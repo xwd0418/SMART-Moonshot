@@ -1,4 +1,13 @@
+# project specific 
+
+pretrain_smiles_exp/
+dataset/*.json
+dataset/*.pkl
+
 # Byte-compiled / optimized / DLL files
+*.smi
+*.pkl
+*.json
 __pycache__/
 *.py[cod]
 *$py.class
