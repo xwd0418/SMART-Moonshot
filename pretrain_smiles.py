@@ -17,7 +17,7 @@ from functools import reduce
 from dataset.SmilesDataset import SmilesDataModule
 from dataset.SmilesTokenizer import SMILESTokenizerBuilder
 
-from models.PretrainingDecoder import SmilePretrainingDecoder
+from models.PretrainGPT2Decoder import SmilePretrainingDecoderGPT2
         
 def main():
      
@@ -25,14 +25,14 @@ def main():
 
     # dependencies: hyun_fp_data, hyun_pair_ranking_set_07_22
     parser = ArgumentParser(add_help=True)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--expname", type=str, default=f"experiment")
     parser.add_argument("--foldername", type=str, default=f"debug")
     parser.add_argument("--bs", type=int, default=64, help="batch size")
     parser.add_argument("--datasrc", type=str, default="shorter_than_300", help="shorter_than_300 or all")
 
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--num_workers", type=int, default=16)
+    parser.add_argument("--patience", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=8)
     # for early stopping/model saving
     # parser.add_argument("--metric", type=str, default="val/mean_rank_1")
     parser.add_argument("--metric", type=str, default="val/ce_loss")
@@ -44,8 +44,8 @@ def main():
     parser.add_argument(f"--lr", type=float, default=1e-5)
     parser.add_argument(f"--dim_model", type=int, default=384)
     parser.add_argument(f"--num_heads", type=int, default=8)
-    parser.add_argument(f"--num_layers", type=int, default=8)
-    parser.add_argument(f"--ff_dim", type=int, default=512)
+    parser.add_argument(f"--num_decoder_layers", type=int, default=8)
+    parser.add_argument(f"--ff_dim_decoder", type=int, default=512)
     parser.add_argument(f"--embedding_dropout", type=float, default=0.0)
     parser.add_argument(f"--transformer_dropout", type=float, default=0.1)
     parser.add_argument(f"--weight_decay", type=float, default=0.0)
@@ -90,11 +90,16 @@ def main():
     tokenizer.mask_token = "[MASK]"
     tokenizer.cls_token = "[CLS]"
     tokenizer.sep_token = "[SEP]"
+    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids("[PAD]")
+    tokenizer.unk_token_id = tokenizer.convert_tokens_to_ids("[UNK]")
+    tokenizer.mask_token_id = tokenizer.convert_tokens_to_ids("[MASK]")
+    tokenizer.cls_token_id = tokenizer.convert_tokens_to_ids("[CLS]")
+    tokenizer.sep_token_id = tokenizer.convert_tokens_to_ids("[SEP]")
     
-    model =  SmilePretrainingDecoder(parser_args=args, tokenizer=tokenizer)
     
+    model =  SmilePretrainingDecoderGPT2(parser_args=args, tokenizer=tokenizer)
     my_logger.info(f"[Main] Model Summary: {summarize(model)}")
-  
+    
     data_module = SmilesDataModule(tokenizer=tokenizer, parser_args=args)
 
     # Trainer, callbacks
@@ -111,6 +116,7 @@ def main():
                          accelerator="gpu",
                          logger=tbl, 
                          callbacks=[checkpoint_callback, early_stopping, lr_monitor],
+                         val_check_interval = 0.1
                         )
     if args["validate"]:
         my_logger.info("[Main] Just performing validation step")

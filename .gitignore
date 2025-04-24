@@ -1,10 +1,11 @@
 # project specific 
 
 pretrain_smiles_exp/
-dataset/*.json
-dataset/*.pkl
+moonshot_dataset/data
+Spectre
 
 # Byte-compiled / optimized / DLL files
+*.pt
 *.smi
 *.pkl
 *.json
