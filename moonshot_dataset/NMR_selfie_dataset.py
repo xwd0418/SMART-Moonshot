@@ -215,7 +215,12 @@ class NMR_Selfie_Dataset(Dataset):
         inputs, NMR_type_indicator = self.pad_and_stack_input(hsqc, c_tensor, h_tensor, mol_weight)
         
     
-        combined = (inputs, NMR_type_indicator, encoded_selfie)
+        combined = [inputs, NMR_type_indicator, encoded_selfie]
+        if self.split in ["val", "test"]:
+            # if self.p_args['combine_oneD_only_dataset']:
+            #     combined.append(self.files[i])
+            # else:
+            combined.append(smiles)
         return combined
     
     def pad_and_stack_input(self, hsqc, c_tensor, h_tensor, mol_weight):
@@ -265,8 +270,13 @@ def collate_fn(batch):
     # print(items[2])
     selfie_token_idxs = torch.tensor(items[2]) # no padding needed, padding is done in get_item
 
-    combined = (NMRs, NMR_type_indicator, selfie_token_idxs)
-    return combined
+    if len(items) == 3:
+        combined = (NMRs, NMR_type_indicator, selfie_token_idxs)
+        return combined
+    elif len(items) == 4: # also smiles string
+        SMILESs = items[3]
+        combined = (NMRs, NMR_type_indicator, selfie_token_idxs, SMILESs)
+        return combined
 
 class NMR_Selfie_DataModule(pl.LightningDataModule):
     def __init__(self, input_src, batch_size, p_args=None, persistent_workers = True):

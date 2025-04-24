@@ -1,18 +1,18 @@
-import sys
-import os
+import sys, os, pickle
 import pathlib
+
 # Add the current directory to sys.path
 sys.path.append(pathlib.Path(__file__).parent.parent.absolute().__str__())
 import pytorch_lightning as pl
 import torch
 from torch import nn
-import numpy as np
-import pytorch_lightning as pl
 import selfies
+from rdkit.Chem import rdFingerprintGenerator
+from rdkit import Chem
 
 from Spectre.models.encoders.encoder_factory import build_encoder
 from Spectre.utils.lr_scheduler import NoamOpt
-
+import torch.nn.functional as F
 
 
 # ------------------------ Model ------------------------
@@ -29,12 +29,15 @@ class SmartBart(pl.LightningModule):
         self.selfie_symbol_to_idx = selfie_symbol_to_idx
         to_save = {**p_args}
         self.save_hyperparameters(to_save, logger=True)
-        self.lr = p_args['lr']
-        self.weight_decay = p_args['weight_decay']
-        self.noam_factor = p_args['noam_factor']
-        self.warm_up_steps = p_args['warm_up_steps']
         
-        
+        tokenizer_path = pathlib.Path(__file__).parent.parent / 'moonshot_dataset' / 'data' / 'selfies_tokenizer'
+        # load idx_to_symbol 
+        with open(tokenizer_path / 'idx_to_symbol.pkl', 'rb') as f:
+            self.idx_to_symbol = pickle.load(f)
+            
+        self.MFP_generator = rdFingerprintGenerator.GetMorganGenerator()
+        # using default radius=3, fp_size=2048,
+        # maybe use multithread in the future
         
         # NMR encoder config
         if p_args['load_encoder']:
@@ -180,13 +183,9 @@ class SmartBart(pl.LightningModule):
             dec_output_logits = torch.stack(dec_output_logits, dim=1)
             return dec_output_logits
         
-    def forward(self, NMR, NMR_type_indicator, tgt_selfie=None, return_representations=False):
-        
-        
+    def forward(self, NMR, NMR_type_indicator, tgt_selfie=None, return_representations=False):        
         encoder_memory, src_mask = self.encode(NMR, NMR_type_indicator) 
         # print("encoder_memory.shape", encoder_memory.shape)
-
-
         # print("memory.shape", memory.shape)
         # print("tgt_emb.shape", tgt_emb.shape)
         # print("src_mask.shape", src_mask.shape)
@@ -207,21 +206,29 @@ class SmartBart(pl.LightningModule):
         return loss
     
     def validation_step(self, batch, batch_idx):
-        NMR, NMR_type_indicator, tgt = batch
+        NMR, NMR_type_indicator, tgt, smiles = batch
         tgt_input = tgt[:, :-1]
         tgt_output = tgt
         logits = self(NMR, NMR_type_indicator, tgt_input)
-        print("logits.shape", logits.shape)
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
         self.log("val/loss", loss)
         # print("val_loss", loss)
+        pred_ids = logits.argmax(dim=-1)  # [B, T]
+
+        # Decode SELFIES
+        predicted_smiles = [self.get_smiles(seq) for seq in pred_ids]
+        print("Example decoded SELFIES:")
+        for i,s in enumerate(predicted_smiles[:5]):
+            print(s)
+            cos_sim = F.cosine_similarity(self.gen_mfp(smiles[i]), self.gen_mfp(s), dim=0)
+            print("cosine similarity", cos_sim)
         return loss
     
     def test_step(self, batch, batch_idx):
-        NMR, NMR_type_indicator, tgt = batch
+        NMR, NMR_type_indicator, tgt, smiles = batch
         tgt_input = tgt[:, :-1]
         tgt_output = tgt
-        logits = self(NMR, NMR_type_indicator, tgt_input)
+        logits = self(NMR, NMR_type_indicator)
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
         self.log("test/loss", loss)
         # print("test_loss", loss)
@@ -243,13 +250,18 @@ class SmartBart(pl.LightningModule):
         selfie = self.get_selfies(seq)
         return selfies.decoder(selfie)
         
+    def gen_mfp(self, smiles):
+        mol = Chem.MolFromSmiles(smiles)
+        fp = self.MFP_generator.GetFingerprint(mol)
+        return torch.tensor(fp).float()
 
     def configure_optimizers(self):
-        optim = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay = self.weight_decay, 
-                                     betas=(0.9, 0.98), eps=1e-9)
-            
+        optim = torch.optim.AdamW(self.parameters(), lr=self.p_args['lr'], 
+                                     weight_decay = self.p_args['weight_decay'], 
+                                     betas=(0.9, 0.98), eps=1e-9
+                                ) 
         model_size = (self.p_args["encoder_embed_dim"] + self.p_args["decoder_embed_dim"]) // 2
-        scheduler = NoamOpt(model_size, self.warm_up_steps, optim, self.noam_factor)
+        scheduler = NoamOpt(model_size, self.p_args['warm_up_steps'], optim, self.p_args['noam_factor'])
         
         return {
             "optimizer": optim,
