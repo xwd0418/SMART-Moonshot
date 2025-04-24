@@ -8,9 +8,12 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 import pathlib
 import selfies
+from rdkit.Chem import rdFingerprintGenerator
+from rdkit import Chem
+
 
 repo_path = str(pathlib.Path(__file__).parent.parent.absolute() / "Spectre")
-SELFIES_MAX_LEN = 455
+SELFIES_MAX_LEN = 460
 
 class NMR_Selfie_Dataset(Dataset):
     def __init__(self, split="train", input_src=["HSQC"], symbol_to_idx=None, p_args=None):
@@ -221,6 +224,7 @@ class NMR_Selfie_Dataset(Dataset):
             #     combined.append(self.files[i])
             # else:
             combined.append(smiles)
+            combined.append(self.gen_mfp(smiles))
         return combined
     
     def pad_and_stack_input(self, hsqc, c_tensor, h_tensor, mol_weight):
@@ -251,7 +255,11 @@ class NMR_Selfie_Dataset(Dataset):
         NMR_type_indicator = torch.tensor(NMR_type_indicator).long()
         return inputs, NMR_type_indicator
     
-
+    def gen_mfp(self, smiles):
+        MFP_generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+        mol = Chem.MolFromSmiles(smiles)
+        fp = MFP_generator.GetFingerprint(mol)
+        return torch.tensor(fp).float()
                 
 # used as collate_fn in the dataloader
 def collate_fn(batch):
@@ -273,11 +281,12 @@ def collate_fn(batch):
     if len(items) == 3:
         combined = (NMRs, NMR_type_indicator, selfie_token_idxs)
         return combined
-    elif len(items) == 4: # also smiles string
+    elif len(items) == 5: # also smiles string and mfp
         SMILESs = items[3]
-        combined = (NMRs, NMR_type_indicator, selfie_token_idxs, SMILESs)
+        MFPs = torch.stack(items[4])
+        combined = (NMRs, NMR_type_indicator, selfie_token_idxs, SMILESs, MFPs)
         return combined
-
+    
 class NMR_Selfie_DataModule(pl.LightningDataModule):
     def __init__(self, input_src, batch_size, p_args=None, persistent_workers = True):
         super().__init__()

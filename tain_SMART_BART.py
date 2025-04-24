@@ -97,8 +97,8 @@ def add_parser_arguments( parser):
     parser.add_argument("--patience", type=int, default=7)
     parser.add_argument("--num_workers", type=int, default=4)
     # for early stopping/model saving
-    parser.add_argument("--metric", type=str, default="val/loss") 
-    parser.add_argument("--metricmode", type=str, default="min")
+    parser.add_argument("--metric", type=str, default="val/mean_cosine_similarity") 
+    parser.add_argument("--metricmode", type=str, default="max")
 
     parser.add_argument("--freeze", type=lambda x:bool(str2bool(x)), default=False)
     parser.add_argument("--validate", type=lambda x:bool(str2bool(x)), default=False)
@@ -219,7 +219,6 @@ if __name__ == '__main__':
             if trainer.global_rank == 0:
                 
                 # testing
-                model.setup_ranker()
                 model.logger_should_sync_dist = False
                 
                 # my_logger.info(f"[Main] my process rank: {os.getpid()}")

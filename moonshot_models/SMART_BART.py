@@ -9,11 +9,12 @@ from torch import nn
 import selfies
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit import Chem
-
+import numpy as np
 from Spectre.models.encoders.encoder_factory import build_encoder
 from Spectre.utils.lr_scheduler import NoamOpt
 import torch.nn.functional as F
 
+from concurrent.futures import ThreadPoolExecutor
 
 # ------------------------ Model ------------------------
 class SmartBart(pl.LightningModule):
@@ -34,11 +35,12 @@ class SmartBart(pl.LightningModule):
         # load idx_to_symbol 
         with open(tokenizer_path / 'idx_to_symbol.pkl', 'rb') as f:
             self.idx_to_symbol = pickle.load(f)
-            
-        self.MFP_generator = rdFingerprintGenerator.GetMorganGenerator()
-        # using default radius=3, fp_size=2048,
-        # maybe use multithread in the future
         
+        # logging 
+        self.validation_step_outputs = []
+        self.training_step_outputs = []
+        self.test_step_outputs = []
+          
         # NMR encoder config
         if p_args['load_encoder']:
             spectre_model = None
@@ -185,10 +187,6 @@ class SmartBart(pl.LightningModule):
         
     def forward(self, NMR, NMR_type_indicator, tgt_selfie=None, return_representations=False):        
         encoder_memory, src_mask = self.encode(NMR, NMR_type_indicator) 
-        # print("encoder_memory.shape", encoder_memory.shape)
-        # print("memory.shape", memory.shape)
-        # print("tgt_emb.shape", tgt_emb.shape)
-        # print("src_mask.shape", src_mask.shape)
         logits = self.decode(encoder_memory, tgt_selfie, src_mask)
 
         return logits
@@ -206,33 +204,51 @@ class SmartBart(pl.LightningModule):
         return loss
     
     def validation_step(self, batch, batch_idx):
-        NMR, NMR_type_indicator, tgt, smiles = batch
+        NMR, NMR_type_indicator, tgt, truth_smiles, MFPs= batch
         tgt_input = tgt[:, :-1]
         tgt_output = tgt
         logits = self(NMR, NMR_type_indicator, tgt_input)
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
-        self.log("val/loss", loss)
-        # print("val_loss", loss)
-        pred_ids = logits.argmax(dim=-1)  # [B, T]
 
-        # Decode SELFIES
-        predicted_smiles = [self.get_smiles(seq) for seq in pred_ids]
-        print("Example decoded SELFIES:")
-        for i,s in enumerate(predicted_smiles[:5]):
-            print(s)
-            cos_sim = F.cosine_similarity(self.gen_mfp(smiles[i]), self.gen_mfp(s), dim=0)
-            print("cosine similarity", cos_sim)
-        return loss
+        pred_ids = logits.argmax(dim=-1)  # [B, T]
+        predicted_smiles, predicted_mfps = self.decode_smiles_and_mfp_multithreaded(pred_ids)
+        count_valid_smiles = torch.sum(predicted_mfps.sum(dim=1) != 0)
+        valid_smiles_rate = count_valid_smiles / len(predicted_mfps)
+        # print("valid_smiles_rate", valid_smiles_rate)
+        cos_sim = F.cosine_similarity(MFPs, predicted_mfps, dim=1)
+        
+        metrics = {
+            "cosine_similarity": cos_sim.mean(),
+            "valid_smiles_rate": valid_smiles_rate,
+            "loss": loss,
+        }
+        if type(self.validation_step_outputs)==list: # adapt for child class: optional_input_ranked_transformer
+            self.validation_step_outputs.append(metrics)
+        return metrics
     
     def test_step(self, batch, batch_idx):
-        NMR, NMR_type_indicator, tgt, smiles = batch
-        tgt_input = tgt[:, :-1]
+        NMR, NMR_type_indicator, tgt, truth_smiles, MFPs = batch
+        # tgt_input = tgt[:, :-1]
         tgt_output = tgt
         logits = self(NMR, NMR_type_indicator)
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
-        self.log("test/loss", loss)
-        # print("test_loss", loss)
-        return loss
+        
+        pred_ids = logits.argmax(dim=-1)  # [B, T]
+
+        predicted_smiles, predicted_mfps = self.decode_smiles_and_mfp_multithreaded(pred_ids)
+        count_valid_smiles = torch.sum(predicted_mfps.sum(dim=1) != 0)
+        valid_smiles_rate = count_valid_smiles / len(predicted_mfps)
+        cos_sim = F.cosine_similarity(MFPs, predicted_mfps, dim=1)
+        
+        metrics = {
+            "cosine_similarity": cos_sim.mean(),
+            "valid_smiles_rate": valid_smiles_rate,
+            "loss": loss,
+        }
+        if type(self.test_step_outputs)==list: # adapt for child class: optional_input_ranked_transformer
+            self.test_step_outputs.append(metrics)
+        return metrics
+    
 
     def get_selfies(self, seq):
         selfie = ''
@@ -248,13 +264,66 @@ class SmartBart(pl.LightningModule):
     
     def get_smiles(self, seq):
         selfie = self.get_selfies(seq)
-        return selfies.decoder(selfie)
+        smiles = selfies.decoder(selfie)
+        
+        return smiles
         
     def gen_mfp(self, smiles):
-        mol = Chem.MolFromSmiles(smiles)
-        fp = self.MFP_generator.GetFingerprint(mol)
-        return torch.tensor(fp).float()
+        try:
+            MFP_generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+            mol = Chem.MolFromSmiles(smiles)
+            Chem.SanitizeMol(mol)
+            fp = MFP_generator.GetFingerprint(mol)
+            return torch.tensor(fp).float()
+        except:
+            
+            # print("smiles is ", smiles)
+            # print("Error in gen_mfp")
+            return torch.zeros(2048).float()
+    
+    def decode_smiles_and_mfp_multithreaded(self, pred_ids, max_workers=8):
+        """ 
+        Returns 
+            predicted_smiles: a list of SMILES strings 
+            predicted_mfps: a tensor of Morgan fingerprints (batch , 2048)
+        """
+        def decode_and_fingerprint(seq):
+            smiles = self.get_smiles(seq)
+            mfp = self.gen_mfp(smiles)
+            return smiles, mfp
 
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(decode_and_fingerprint, pred_ids))
+
+        predicted_smiles = [r[0] for r in results]
+        predicted_mfps = torch.stack([r[1] for r in results])
+
+        return predicted_smiles, predicted_mfps.to(self.device)
+
+
+    def on_validation_epoch_end(self):
+        # return
+        feats = self.validation_step_outputs[0].keys()
+        di = {}
+        for feat in feats:
+            di[f"val/mean_{feat}"] = torch.stack([v[feat]
+                                             for v in self.validation_step_outputs]).mean()
+        for k, v in di.items():
+            self.log(k, v, on_epoch=True, prog_bar=k=="val/mean_cosine_similarity")
+        self.validation_step_outputs.clear()
+        
+    def on_test_epoch_end(self):
+        feats = self.test_step_outputs[0].keys()
+        di = {}
+        for feat in feats:
+            di[f"test/mean_{feat}"] = torch.stack([v[feat]
+                                             for v in self.test_step_outputs]).mean()
+        for k, v in di.items():
+            self.log(k, v, on_epoch=True)
+        self.test_step_outputs.clear()
+        
+            
+    
     def configure_optimizers(self):
         optim = torch.optim.AdamW(self.parameters(), lr=self.p_args['lr'], 
                                      weight_decay = self.p_args['weight_decay'], 
