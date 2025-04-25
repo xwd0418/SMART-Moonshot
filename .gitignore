@@ -3,6 +3,7 @@
 pretrain_smiles_exp/
 moonshot_dataset/data
 Spectre
+lightning_logs
 
 # Byte-compiled / optimized / DLL files
 *.pt

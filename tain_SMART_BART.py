@@ -91,8 +91,9 @@ def add_parser_arguments( parser):
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--foldername", type=str, default=f"test_run")
     parser.add_argument("--expname", type=str, default=f"experiment")
-    parser.add_argument("--bs", type=int, default=32)
+    parser.add_argument("--bs", type=int, default=8)
     parser.add_argument("--accumulate_grad_batches_num", type=int, default=4)
+    parser.add_argument("--use_small_model", type=lambda x:bool(str2bool(x)), default=False, help="use small models")
         
     parser.add_argument("--patience", type=int, default=7)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -132,8 +133,10 @@ if __name__ == '__main__':
 
     # dependencies: hyun_fp_data, hyun_pair_ranking_set_07_22
     parser = ArgumentParser(add_help=True)
-    SmartBart.add_model_specific_args(parser)
     add_parser_arguments(parser)
+    args = vars(parser.parse_known_args()[0])
+
+    SmartBart.add_model_specific_args(parser, use_small_model = args["use_small_model"])
     
     args = vars(parser.parse_known_args()[0])
 
@@ -210,54 +213,60 @@ if __name__ == '__main__':
     else:
             # training
             my_logger.info("[Main] Begin Training!")
-            trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
+            try :
+                trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
 
-            # Ensure all processes synchronize before switching to test mode
-            trainer.strategy.barrier()
+                # Ensure all processes synchronize before switching to test mode
+                trainer.strategy.barrier()
 
-            # Now, only rank 0 will proceed to test
-            if trainer.global_rank == 0:
-                
-                # testing
-                model.logger_should_sync_dist = False
-                
-                # my_logger.info(f"[Main] my process rank: {os.getpid()}")
-                trainer = pl.Trainer( devices = 1, accumulate_grad_batches=args["accumulate_grad_batches_num"])
-                my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
-                my_logger.info(f"[Main] Testing path {checkpoint_callback.best_model_path}!")
-                all_test_results = [{}]
-                test_result = trainer.test(model, data_module,ckpt_path=checkpoint_callback.best_model_path)
-                test_result[0]['best_epoch'] = checkpoint_callback.best_model_path.split("/")[-1].split("-")[0]
-                if not args['optional_inputs']:
-                
-                    NP_classwise_accu = {k.split("/")[-1]:v for k,v in test_result[0].items() if "rank_1_of_NP_class" in k}
-                    img_path = pathlib.Path(checkpoint_callback.best_model_path).parents[1] / f"NP_class_accu.png"
-                    all_test_results = test_result
-                else:
-                    # loader_all_inputs, loader_HSQC_H_NMR, loader_HSQC_C_NMR, loader_only_hsqc, loader_only_1d, loader_only_H_NMR, loader_only_C_NMR
-                    for loader_idx, NMR_type in enumerate(["all_inputs", "HSQC_H_NMR", "HSQC_C_NMR", "only_hsqc", "only_1d", "only_H_NMR", "only_C_NMR"]):
-                        model.only_test_this_loader(loader_idx=loader_idx)
-                        # test/rank_1_of_NP_class/Sesterterpenoids/HSQC_C_NMR
-                        NP_classwise_accu = {k.split("/")[-2]:v for k,v in test_result[0].items() if "rank_1_of_NP_class" in k and NMR_type in k}
-                        img_path = pathlib.Path(checkpoint_callback.best_model_path).parents[1] / f"NP_class_accu_{NMR_type}.png"
-                    all_test_results = test_result
-    
-    
-                with open(f"{out_path}/{path1}/{path2}/test_result.pkl", "wb") as f:
-                    pickle.dump(all_test_results, f)
+                # Now, only rank 0 will proceed to test
+                if trainer.global_rank == 0:
                     
-                
-    
-                my_logger.info("[Main] Done!")
+                    # testing
+                    model.logger_should_sync_dist = False
+                    
+                    # my_logger.info(f"[Main] my process rank: {os.getpid()}")
+                    trainer = pl.Trainer( devices = 1, accumulate_grad_batches=args["accumulate_grad_batches_num"])
+                    my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
+                    my_logger.info(f"[Main] Testing path {checkpoint_callback.best_model_path}!")
+                    all_test_results = [{}]
+                    test_result = trainer.test(model, data_module,ckpt_path=checkpoint_callback.best_model_path)
+                    test_result[0]['best_epoch'] = checkpoint_callback.best_model_path.split("/")[-1].split("-")[0]
+                    if not args['optional_inputs']:
+                    
+                        NP_classwise_accu = {k.split("/")[-1]:v for k,v in test_result[0].items() if "rank_1_of_NP_class" in k}
+                        img_path = pathlib.Path(checkpoint_callback.best_model_path).parents[1] / f"NP_class_accu.png"
+                        all_test_results = test_result
+                    else:
+                        # loader_all_inputs, loader_HSQC_H_NMR, loader_HSQC_C_NMR, loader_only_hsqc, loader_only_1d, loader_only_H_NMR, loader_only_C_NMR
+                        for loader_idx, NMR_type in enumerate(["all_inputs", "HSQC_H_NMR", "HSQC_C_NMR", "only_hsqc", "only_1d", "only_H_NMR", "only_C_NMR"]):
+                            model.only_test_this_loader(loader_idx=loader_idx)
+                            # test/rank_1_of_NP_class/Sesterterpenoids/HSQC_C_NMR
+                            NP_classwise_accu = {k.split("/")[-2]:v for k,v in test_result[0].items() if "rank_1_of_NP_class" in k and NMR_type in k}
+                            img_path = pathlib.Path(checkpoint_callback.best_model_path).parents[1] / f"NP_class_accu_{NMR_type}.png"
+                        all_test_results = test_result
+        
+        
+                    with open(f"{out_path}/{path1}/{path2}/test_result.pkl", "wb") as f:
+                        pickle.dump(all_test_results, f)
+                        
+                    
+        
+                    my_logger.info("[Main] Done!")
 
-                for key, value in all_test_results[0].items():
-                    my_logger.info(f"{key}: {value}")
-                if args['delete_checkpoint']:
-                    os.remove(checkpoint_callback.best_model_path)
-                    my_logger.info(f"[Main] Deleted checkpoint {checkpoint_callback.best_model_path}")
-                os.system(f"cp -r {out_path}/* {out_path_final}/ ")
-                my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
-                logging.shutdown()
+                    for key, value in all_test_results[0].items():
+                        my_logger.info(f"{key}: {value}")
+                    if args['delete_checkpoint']:
+                        os.remove(checkpoint_callback.best_model_path)
+                        my_logger.info(f"[Main] Deleted checkpoint {checkpoint_callback.best_model_path}")
+            except Exception as e:
+                if trainer.global_rank == 0:
+                    my_logger.error(f"[Main] Exception during training: \n{e}")
+            finally:
+                if trainer.global_rank == 0:
+                    os.system(f"cp -r {out_path}/* {out_path_final}/ ")
+                    my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
+                    logging.shutdown()
 
 
 
