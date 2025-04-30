@@ -10,6 +10,9 @@ import pathlib
 import selfies
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit import Chem
+from pathlib import Path
+from Spectre.inference.inference_utils import  build_input
+from Spectre.datasets.dataset_utils import isomeric_to_canonical_smiles
 
 
 repo_path = str(pathlib.Path(__file__).parent.parent.absolute() / "Spectre")
@@ -62,7 +65,7 @@ class NMR_Selfie_Dataset(Dataset):
             if rank != 0:
                 # For any process with rank other than 0, set logger level to WARNING or higher
                 logger.setLevel(logging.WARNING)
-        logger.info(f"[NMR_Selfie_Dataset]: dir={dir},input_src={input_src},split={split}")
+        logger.info(f"[NMR_Selfie_Dataset]: dir={self.dir},input_src={input_src},split={split}")
         
         if self.p_args['only_C_NMR']:
             def filter_unavailable(x):
@@ -95,7 +98,7 @@ class NMR_Selfie_Dataset(Dataset):
         
     def __len__(self):
         if self.p_args['debug'] or self.p_args.get('foldername') == "debug":
-            return 3000
+            return 100
         length = len(self.files)
         if self.p_args['combine_oneD_only_dataset']:
             length += len(self.files_1d)
@@ -217,14 +220,14 @@ class NMR_Selfie_Dataset(Dataset):
         # padding 1D NMRs and stacking： 
         inputs, NMR_type_indicator = self.pad_and_stack_input(hsqc, c_tensor, h_tensor, mol_weight)
         
-    
+        
         combined = [inputs, NMR_type_indicator, encoded_selfie]
         if self.split in ["val", "test"]:
             # if self.p_args['combine_oneD_only_dataset']:
             #     combined.append(self.files[i])
             # else:
             combined.append(smiles)
-            combined.append(self.gen_mfp(smiles))
+            combined.append(gen_mfp(smiles))
         return combined
     
     def pad_and_stack_input(self, hsqc, c_tensor, h_tensor, mol_weight):
@@ -255,11 +258,51 @@ class NMR_Selfie_Dataset(Dataset):
         NMR_type_indicator = torch.tensor(NMR_type_indicator).long()
         return inputs, NMR_type_indicator
     
-    def gen_mfp(self, smiles):
-        MFP_generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
-        mol = Chem.MolFromSmiles(smiles)
-        fp = MFP_generator.GetFingerprint(mol)
-        return torch.tensor(fp).float()
+    
+class NovelMolDataset(Dataset):
+    def __init__(self, symbol_to_idx=None, p_args=None):
+        # self.dir = Path
+        file_dir = Path(__file__).parent.parent / "Spectre" / "datasets" / "testing_compounds"
+        self.file_dir = file_dir
+        self.compound_dirs = os.listdir(file_dir)
+        self.compound_dirs = [d for d in self.compound_dirs if os.path.isdir(file_dir / d)]
+        self.compound_dirs.sort()
+        self.symbol_to_idx = symbol_to_idx
+        self.max_len_selfies = SELFIES_MAX_LEN
+        self.p_args = p_args
+    
+    def __len__(self):
+        return len(self.compound_dirs)
+    
+    def __getitem__(self, idx):
+        compound_dir = self.file_dir / self.compound_dirs[idx]
+        inputs, NMR_type_indicator = build_input(compound_dir, 
+                                                 include_hsqc = self.p_args["use_HSQC"], 
+                                                 include_c_nmr = self.p_args["use_C_NMR"], 
+                                                 include_h_nmr = self.p_args["use_H_NMR"], 
+                                                 include_MW = self.p_args["use_MW"],)
+        
+        smiles_file = compound_dir / "SMILES.txt"
+        with open(smiles_file, "r") as f:
+            smiles = f.read().strip()
+            
+        smiles = isomeric_to_canonical_smiles(smiles)
+        
+        selfies_str = selfies.encoder(smiles) 
+        encoded_selfie = [self.symbol_to_idx[symbol] for symbol in selfies.split_selfies(selfies_str)] 
+        encoded_selfie = [        self.symbol_to_idx['[START]']] \
+                                + encoded_selfie \
+                                + [self.symbol_to_idx['[END]']] \
+                                + [self.symbol_to_idx['[PAD]'] for _ in range(self.max_len_selfies - 2 - len(encoded_selfie))]
+                                
+        combined = [inputs, NMR_type_indicator, encoded_selfie, smiles ,gen_mfp(smiles)]
+        return combined
+    
+def gen_mfp(smiles):
+    MFP_generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+    mol = Chem.MolFromSmiles(smiles)
+    fp = MFP_generator.GetFingerprint(mol)
+    return torch.tensor(fp).float()
                 
 # used as collate_fn in the dataloader
 def collate_fn(batch):
@@ -319,6 +362,8 @@ class NMR_Selfie_DataModule(pl.LightningDataModule):
                                             symbol_to_idx=self.symbol_to_idx, 
                                             # idx_to_symbol=self.idx_to_symbol,
                                             p_args=self.p_args)
+        if stage == "predict" :
+            self.test_novel = NovelMolDataset(symbol_to_idx=self.symbol_to_idx, p_args=self.p_args)
 
     def train_dataloader(self):
             
@@ -333,3 +378,6 @@ class NMR_Selfie_DataModule(pl.LightningDataModule):
         return DataLoader(self.test, batch_size=self.batch_size, collate_fn=self.collate_fn, 
                           num_workers=self.p_args['num_workers'], pin_memory=True, persistent_workers=self.should_persist_workers)
     
+    def predict_dataloader(self):
+        return DataLoader(self.test_novel, batch_size=self.batch_size, collate_fn=self.collate_fn, 
+                          num_workers=self.p_args['num_workers'], pin_memory=True, persistent_workers=self.should_persist_workers)

@@ -6,13 +6,17 @@ sys.path.append(pathlib.Path(__file__).parent.parent.absolute().__str__())
 import pytorch_lightning as pl
 import torch
 from torch import nn
+import torch.nn.functional as F
+import numpy as np
+
 import selfies
 from rdkit.Chem import rdFingerprintGenerator
 from rdkit import Chem
-import numpy as np
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
+
 from Spectre.models.encoders.encoder_factory import build_encoder
 from Spectre.utils.lr_scheduler import NoamOpt
-import torch.nn.functional as F
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -25,11 +29,12 @@ class SmartBart(pl.LightningModule):
                 p_args,
                  ):
         super().__init__()
-        self.save_hyperparameters()
+        # self.save_hyperparameters()
         self.p_args = p_args
         self.selfie_symbol_to_idx = selfie_symbol_to_idx
         to_save = {**p_args}
         self.save_hyperparameters(to_save, logger=True)
+        self.logger_should_sync_dist = torch.cuda.device_count() > 1
         
         tokenizer_path = pathlib.Path(__file__).parent.parent / 'moonshot_dataset' / 'data' / 'selfies_tokenizer'
         # load idx_to_symbol 
@@ -40,6 +45,9 @@ class SmartBart(pl.LightningModule):
         self.validation_step_outputs = []
         self.training_step_outputs = []
         self.test_step_outputs = []
+        self.predict_step_outputs = {} # map a molecule to its predicted SMILES 
+        
+        self.validate_with_generation = False
           
         # NMR encoder config
         if p_args['load_encoder']:
@@ -62,7 +70,6 @@ class SmartBart(pl.LightningModule):
                 nhead=p_args['num_encoder_heads'],
                 dim_feedforward=p_args['encoder_embed_dim'] * 4,
                 batch_first=True,
-                norm_first=True,
                 dropout=p_args['transformer_dropout'],
             )
             self.transformer_encoder = torch.nn.TransformerEncoder(
@@ -99,7 +106,6 @@ class SmartBart(pl.LightningModule):
                 nhead=p_args['num_decoder_heads'], 
                 dim_feedforward=p_args['decoder_embed_dim'] * 4,
                 batch_first=True,
-                norm_first=True,
                 dropout=p_args['transformer_dropout'],
             )
             self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=p_args['num_decoder_layers'])
@@ -207,7 +213,11 @@ class SmartBart(pl.LightningModule):
         NMR, NMR_type_indicator, tgt, truth_smiles, MFPs= batch
         tgt_input = tgt[:, :-1]
         tgt_output = tgt
-        logits = self(NMR, NMR_type_indicator, tgt_input)
+        if self.validate_with_generation:
+            logits = self(NMR, NMR_type_indicator)
+        else: # teacher forcing
+            logits = self(NMR, NMR_type_indicator, tgt_input)
+            
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
 
         pred_ids = logits.argmax(dim=-1)  # [B, T]
@@ -228,6 +238,8 @@ class SmartBart(pl.LightningModule):
     
     def test_step(self, batch, batch_idx):
         NMR, NMR_type_indicator, tgt, truth_smiles, MFPs = batch
+        print(NMR)
+        exit(0)
         # tgt_input = tgt[:, :-1]
         tgt_output = tgt
         logits = self(NMR, NMR_type_indicator)
@@ -247,7 +259,32 @@ class SmartBart(pl.LightningModule):
         }
         if type(self.test_step_outputs)==list: # adapt for child class: optional_input_ranked_transformer
             self.test_step_outputs.append(metrics)
+        print(f"{truth_smiles=}, {predicted_smiles=}")
         return metrics
+    
+    def predict_step(self,  batch, batch_idx):
+        NMR, NMR_type_indicator, tgt, truth_smiles, MFPs = batch
+        # tgt_input = tgt[:, :-1]
+        tgt_output = tgt
+        logits = self(NMR, NMR_type_indicator)
+        
+        pred_ids = logits.argmax(dim=-1)  # [B, T]
+
+        predicted_smiles, predicted_mfps = self.decode_smiles_and_mfp_multithreaded(pred_ids)
+        count_valid_smiles = torch.sum(predicted_mfps.sum(dim=1) != 0)
+        valid_smiles_rate = count_valid_smiles / len(predicted_mfps)
+        cos_sim = F.cosine_similarity(MFPs, predicted_mfps, dim=1)
+        
+        metrics = {
+            "truth_smiles": truth_smiles,
+            "predicted_smiles": predicted_smiles,
+            "cosine_similarity": cos_sim.mean(),
+            "valid_smiles_rate": valid_smiles_rate,
+        }
+        if type(self.predict_step_outputs)==list: # adapt for child class: optional_input_ranked_transformer
+            self.predict_step_outputs.append(metrics)
+        return metrics
+        
     
 
     def get_selfies(self, seq):
@@ -309,7 +346,8 @@ class SmartBart(pl.LightningModule):
             di[f"val/mean_{feat}"] = torch.stack([v[feat]
                                              for v in self.validation_step_outputs]).mean()
         for k, v in di.items():
-            self.log(k, v, on_epoch=True, prog_bar=k=="val/mean_cosine_similarity")
+            self.log(k, v, on_epoch=True, prog_bar = k in ["val/mean_cosine_similarity", 
+                                                          "val/mean_valid_smiles_rate"])
         self.validation_step_outputs.clear()
         
     def on_test_epoch_end(self):
@@ -322,7 +360,15 @@ class SmartBart(pl.LightningModule):
             self.log(k, v, on_epoch=True)
         self.test_step_outputs.clear()
         
+    # def on_predict_epoch_end(self):
+    #     feats = self.predict_step_outputs[0].keys()
+    #     di = {}
+    #     for feat in feats:
+    #         di[f"predict/mean_{feat}"] = torch.stack([v[feat]
+    #                                          for v in self.predict_step_outputs]).mean()
+    #     print(di)
             
+    #     self.predict_step_outputs.clear()
     
     def configure_optimizers(self):
         optim = torch.optim.AdamW(self.parameters(), lr=self.p_args['lr'], 
@@ -340,41 +386,47 @@ class SmartBart(pl.LightningModule):
                 "frequency": 1,
             }
         }
-
+        
+    def log(self, name, value, *args, **kwargs):
+        # Set 'sync_dist' to True by default
+        if kwargs.get('sync_dist') is None:
+            kwargs['sync_dist'] = self.logger_should_sync_dist
+        # if name == "test/mean_rank_1":
+        #     print(kwargs,"\n\n")
+        super().log(name, value, *args, **kwargs)
     
     @staticmethod
-    def add_model_specific_args(parent_parser, model_name=""):
+    def add_model_specific_args(parent_parser, use_small_model = False, model_name=""):
         model_name = model_name if len(model_name) == 0 else f"{model_name}_"
         parser = parent_parser.add_argument_group(model_name)
         parser.add_argument(f"--{model_name}lr", type=float, default=1e-5)
         parser.add_argument(f"--{model_name}noam_factor", type=float, default=1.0)
         
-        # ### large model
-        # parser.add_argument(f"--{model_name}dim_coords", metavar='N',
-        #                     type=int, default=[365, 365, 54 ],
-        #                     nargs="+", action="store")
-        # parser.add_argument(f"--{model_name}num_encoder_heads", type=int, default=8)
-        # parser.add_argument(f"--{model_name}num_decoder_heads", type=int, default=8)
-        # parser.add_argument(f"--{model_name}encoder_embed_dim", type=int, default=784)
-        # parser.add_argument(f"--{model_name}decoder_embed_dim", type=int, default=784)
-        # parser.add_argument(f"--{model_name}num_encoder_layers", type=int, default=16)
-        # parser.add_argument(f"--{model_name}num_decoder_layers", type=int, default=16)
-        # parser.add_argument(f"--{model_name}warm_up_steps", type=int, default=8000)
-        
-        ### small model
-        parser.add_argument(f"--{model_name}dim_coords", metavar='N',
-                            type=int, default=[180, 180, 24 ],
-                            nargs="+", action="store")
-        parser.add_argument(f"--{model_name}num_encoder_heads", type=int, default=8)
-        parser.add_argument(f"--{model_name}num_decoder_heads", type=int, default=8)
-        parser.add_argument(f"--{model_name}encoder_embed_dim", type=int, default=384)
-        parser.add_argument(f"--{model_name}decoder_embed_dim", type=int, default=384)
-        parser.add_argument(f"--{model_name}num_encoder_layers", type=int, default=4)
-        parser.add_argument(f"--{model_name}num_decoder_layers", type=int, default=4)
-        parser.add_argument(f"--{model_name}warm_up_steps", type=int, default=4000)
-        
-        
-        
+        if use_small_model:
+            parser.add_argument(f"--{model_name}dim_coords", metavar='N',
+                                type=int, default=[180, 180, 24 ],
+                                nargs="+", action="store")
+            parser.add_argument(f"--{model_name}num_encoder_heads", type=int, default=8)
+            parser.add_argument(f"--{model_name}num_decoder_heads", type=int, default=8)
+            parser.add_argument(f"--{model_name}encoder_embed_dim", type=int, default=384)
+            parser.add_argument(f"--{model_name}decoder_embed_dim", type=int, default=384)
+            parser.add_argument(f"--{model_name}num_encoder_layers", type=int, default=4)
+            parser.add_argument(f"--{model_name}num_decoder_layers", type=int, default=4)
+            parser.add_argument(f"--{model_name}warm_up_steps", type=int, default=4000)
+        else:
+            ### large model
+            parser.add_argument(f"--{model_name}dim_coords", metavar='N',
+                                type=int, default=[365, 365, 54 ],
+                                nargs="+", action="store")
+            parser.add_argument(f"--{model_name}num_encoder_heads", type=int, default=8)
+            parser.add_argument(f"--{model_name}num_decoder_heads", type=int, default=8)
+            parser.add_argument(f"--{model_name}encoder_embed_dim", type=int, default=784)
+            parser.add_argument(f"--{model_name}decoder_embed_dim", type=int, default=784)
+            parser.add_argument(f"--{model_name}num_encoder_layers", type=int, default=16)
+            parser.add_argument(f"--{model_name}num_decoder_layers", type=int, default=16)
+            parser.add_argument(f"--{model_name}warm_up_steps", type=int, default=8000)
+            
+            
         parser.add_argument(f"--{model_name}wavelength_bounds",
                             type=float, default=[[0.01, 400.0], [0.01, 20.0]], nargs='+', action='append')
         parser.add_argument(f"--{model_name}transformer_dropout", type=float, default=0.1)

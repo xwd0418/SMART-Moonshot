@@ -20,6 +20,8 @@ from moonshot_dataset.NMR_selfie_dataset import NMR_Selfie_DataModule, SELFIES_M
 import argparse
 from argparse import ArgumentParser
 
+from Spectre.utils.interpret_NMR_input_config_args import parse_nmr_input_types
+# from Spectre.utils import interpret_NMR_input_config_args
 
 
 import warnings
@@ -91,8 +93,9 @@ def add_parser_arguments( parser):
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--foldername", type=str, default=f"test_run")
     parser.add_argument("--expname", type=str, default=f"experiment")
-    parser.add_argument("--bs", type=int, default=32)
+    parser.add_argument("--bs", type=int, default=8)
     parser.add_argument("--accumulate_grad_batches_num", type=int, default=4)
+    parser.add_argument("--use_small_model", type=lambda x:bool(str2bool(x)), default=False, help="use small models")
         
     parser.add_argument("--patience", type=int, default=7)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -101,30 +104,37 @@ def add_parser_arguments( parser):
     parser.add_argument("--metricmode", type=str, default="max")
 
     parser.add_argument("--freeze", type=lambda x:bool(str2bool(x)), default=False)
+    parser.add_argument("--train", type=lambda x:bool(str2bool(x)), default=True)
     parser.add_argument("--validate", type=lambda x:bool(str2bool(x)), default=False)
     parser.add_argument("--test", type=lambda x:bool(str2bool(x)), default=False)
+    parser.add_argument("--predict", type=lambda x:bool(str2bool(x)), default=False)
+    
     
     parser.add_argument("--debug", type=lambda x:bool(str2bool(x)), default=False)
     parser.add_argument("--checkpoint_path", type=str, default=None, help="Path to the checkpoint file to resume training")
-    parser.add_argument("--delete_checkpoint", type=lambda x:bool(str2bool(x)), default=False, help="Delete the checkpoint file after training")
+    parser.add_argument("--delete_checkpoint", type=lambda x:bool(str2bool(x)), default=False, help="Delete the checkpoint file after training (to save disk space)")
 
     # different versions of input/output
     
-    parser.add_argument("--use_oneD_NMR_no_solvent",  type=lambda x:bool(str2bool(x)), default=True, help="use 1D NMR data")
-    parser.add_argument("--use_MW",  type=lambda x:bool(str2bool(x)), default=True, help="using mass spectra")
     parser.add_argument("--use_Jaccard",  type=lambda x:bool(str2bool(x)), default=False, help="using Jaccard similarity instead of cosine similarity")
-    parser.add_argument("--jittering",  type=float, default=0, help="a data augmentation technique that jitters the peaks. Choose 'normal' or 'uniform' to choose jittering distribution" )
-    
-    # optional 2D input
-    parser.add_argument("--optional_inputs",  type=lambda x:bool(str2bool(x)), default=False, help="use optional 2D input, inference will contain different input versions")
-    parser.add_argument("--optional_MW",  type=lambda x:bool(str2bool(x)), default=False, help="also make molecular weight as optional input")
-    parser.add_argument("--combine_oneD_only_dataset",  type=lambda x:bool(str2bool(x)), default=False, help="use molecules with only 1D input")
+    parser.add_argument("--jittering",  type=float, default=1.0, help="a data augmentation technique that jitters the peaks. Choose 'normal' or 'uniform' to choose jittering distribution" )
+
+    # # control inputs
+    # parser.add_argument("--optional_inputs",  type=lambda x:bool(str2bool(x)), default=False, help="use optional 2D input, inference will contain different input versions")
+    # parser.add_argument("--optional_MW",  type=lambda x:bool(str2bool(x)), default=False, help="also make molecular weight as optional input")
+    # parser.add_argument("--use_HSQC", type=lambda x:bool(str2bool(x)), default=True, help="also make molecular weight as optional input")
+    # parser.add_argument("--use_H_NMR",  type=lambda x:bool(str2bool(x)), default=True, help="using 1D NMR")
+    # parser.add_argument("--use_C_NMR",  type=lambda x:bool(str2bool(x)), default=True, help="using 1D NMR")
+    # parser.add_argument("--use_MW",  type=lambda x:bool(str2bool(x)), default=True, help="using mass spectra")
+    # parser.add_argument("--train_on_all_info_set", type=lambda x:bool(str2bool(x)), default=False, help="train on subset of training set, where every mol has 3 types of NMR")
+    ## the args above will be used to assign values to the following args
+    parser.add_argument("--use_oneD_NMR_no_solvent",  type=lambda x:bool(str2bool(x)), default=True, help="use 1D NMR data, but not using solvent data")
+    parser.add_argument("--combine_oneD_only_dataset",  type=lambda x:bool(str2bool(x)), default=False, help="will use /workspace/OneD_Only_Dataset/")
     parser.add_argument("--only_oneD_NMR",  type=lambda x:bool(str2bool(x)), default=False, help="only use oneD NMR, C or H or both. By default is both")
     parser.add_argument("--only_C_NMR",  type=lambda x:bool(str2bool(x)), default=False, help="only use oneD C_NMR. Need to use together with only_oneD_NMR")
     parser.add_argument("--only_H_NMR",  type=lambda x:bool(str2bool(x)), default=False, help="only use oneD H_NMR. Need to use together with only_oneD_NMR")
-    parser.add_argument("--separate_classifier",  type=lambda x:bool(str2bool(x)), default=False, help="use separate classifier for various 2D/1D input")
+
     parser.add_argument("--random_seed", type=int, default=42)
-    parser.add_argument("--train_on_all_info_set", type=lambda x:bool(str2bool(x)), default=False)
 
     
 if __name__ == '__main__':
@@ -132,10 +142,22 @@ if __name__ == '__main__':
 
     # dependencies: hyun_fp_data, hyun_pair_ranking_set_07_22
     parser = ArgumentParser(add_help=True)
-    SmartBart.add_model_specific_args(parser)
     add_parser_arguments(parser)
-    
     args = vars(parser.parse_known_args()[0])
+    
+    ckpt_path = args['checkpoint_path']
+    if ckpt_path is not None:
+        with open( pathlib.Path(args['checkpoint_path']).parent.parent / "hparams.yaml", "r") as f:
+            previous_args = yaml.safe_load(f)
+            for k in previous_args.keys():
+                if k not in args.keys():
+                    args[k] = previous_args[k]
+
+    # else:
+    #     SmartBart.add_model_specific_args(parser, use_small_model = args["use_small_model"])
+    #     args = vars(parser.parse_known_args()[0])
+        
+    # args = parse_nmr_input_types(args)
 
     seed_everything(seed=args["random_seed"])   
     
@@ -179,75 +201,121 @@ if __name__ == '__main__':
     early_stop_metric = f'{args["metric"].replace("/", "_")}/only_hsqc' if args['optional_inputs'] else args["metric"]
     early_stopping = EarlyStopping(monitor=early_stop_metric, mode=metricmode, patience=patience)
     lr_monitor = cb.LearningRateMonitor(logging_interval="step")
-    trainer = pl.Trainer(
+    
+    
+    # Model and Data setup
+ 
+    data_module = data_mux(args)
+    if args['optional_inputs']:
+        model_class = OptionalInputRankedTransformer
+    else:
+        model_class = SmartBart
+    
+   
+    
+    if args["validate"]:
+        model = model_class.load_from_checkpoint(checkpoint_path=args["checkpoint_path"], 
+                                                 selfie_symbol_to_idx = data_module.symbol_to_idx,
+                                                selfie_max_len = SELFIES_MAX_LEN,
+                                                p_args = args,
+        )
+        trainer = pl.Trainer( use_distributed_sampler=False)
+        my_logger.info("[Main] Just performing validation step")
+        model.validate_with_generation = True
+        trainer.validate(model, data_module)
+               
+    elif args["test"]:
+        model = model_class.load_from_checkpoint(checkpoint_path=args["checkpoint_path"], 
+                                                 selfie_symbol_to_idx = data_module.symbol_to_idx,
+                                                selfie_max_len = SELFIES_MAX_LEN,
+                                                p_args = args,
+        )    
+        trainer = pl.Trainer( use_distributed_sampler=False)
+        my_logger.info("[Main] Just performing test step")
+        print(f"Checkpoint path: {args['checkpoint_path']}")
+        trainer.test(model, data_module)
+        
+    elif args["predict"]:
+        
+        model = model_class.load_from_checkpoint(checkpoint_path=args["checkpoint_path"], 
+                                                 selfie_symbol_to_idx = data_module.symbol_to_idx,
+                                                selfie_max_len = SELFIES_MAX_LEN,
+                                                p_args = args,
+        )
+        
+        trainer = pl.Trainer( use_distributed_sampler=False)
+        my_logger.info("[Main] Just performing prediction step")
+        prediction = trainer.predict(model, data_module)
+        print(prediction)
+        
+    else:
+        # training
+        model = model_class(
+            selfie_symbol_to_idx = data_module.symbol_to_idx,
+            selfie_max_len = SELFIES_MAX_LEN,
+            p_args = args,
+        )
+        my_logger.info(f"[Main] Model Summary: {summarize(model)}")
+        
+        my_logger.info("[Main] Begin Training!")
+        trainer = pl.Trainer(
                          max_epochs=args["epochs"],
                          accelerator="auto",
                          logger=tbl, 
                          callbacks=[early_stopping, lr_monitor, checkpoint_callback],
                         #  strategy="fsdp" if torch.cuda.device_count() > 1 else "auto",
                          accumulate_grad_batches=args["accumulate_grad_batches_num"],
-                        )
-    
-    # Model and Data setup
-    data_module = data_mux(args)
-    if args['optional_inputs']:
-        model_class = OptionalInputRankedTransformer
-    else:
-        model_class = SmartBart
-    model = model_class(
-        selfie_symbol_to_idx = data_module.symbol_to_idx,
-        selfie_max_len = SELFIES_MAX_LEN,
-        p_args = args,
-    )
-    
-    if trainer.global_rank == 0:
-        my_logger.info(f"[Main] Model Summary: {summarize(model)}")
-    
-    
-    if args["validate"]:
-        my_logger.info("[Main] Just performing validation step")
-        trainer.validate(model, data_module, )
-    else:
-            # training
-            my_logger.info("[Main] Begin Training!")
+        )
+        try :
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
 
             # Ensure all processes synchronize before switching to test mode
-            trainer.strategy.barrier()
-
-            # Now, only rank 0 will proceed to test
+            trainer.strategy.barrier()               
+               
+                
+            # my_logger.info(f"[Main] my process rank: {os.getpid()}")
+            trainer = pl.Trainer( use_distributed_sampler=False) # ensure accurate test results
+            model = model_class.load_from_checkpoint(checkpoint_callback.best_model_path)
+            model.validate_with_generation = True
+            
+            trainer.strategy.barrier()  
+            val_result = trainer.validate(model, data_module) 
+            trainer.strategy.barrier()  
+            test_result = trainer.test(model, data_module,)
+            trainer.strategy.barrier()  
+            predict_results = trainer.predict(model, data_module,)
+            trainer.strategy.barrier()  
+            
             if trainer.global_rank == 0:
-                
-                # testing
-                model.logger_should_sync_dist = False
-                
-                # my_logger.info(f"[Main] my process rank: {os.getpid()}")
-                trainer = pl.Trainer( devices = 1, accumulate_grad_batches=args["accumulate_grad_batches_num"])
                 my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
                 my_logger.info(f"[Main] Testing path {checkpoint_callback.best_model_path}!")
                 all_test_results = [{}]
-                test_result = trainer.test(model, data_module,ckpt_path=checkpoint_callback.best_model_path)
+                all_val_results = [{}]
+                
+                
+                
+                # save the test and validate results
                 test_result[0]['best_epoch'] = checkpoint_callback.best_model_path.split("/")[-1].split("-")[0]
                 if not args['optional_inputs']:
-                
-                    NP_classwise_accu = {k.split("/")[-1]:v for k,v in test_result[0].items() if "rank_1_of_NP_class" in k}
-                    img_path = pathlib.Path(checkpoint_callback.best_model_path).parents[1] / f"NP_class_accu.png"
                     all_test_results = test_result
+                    all_val_results = val_result
                 else:
                     # loader_all_inputs, loader_HSQC_H_NMR, loader_HSQC_C_NMR, loader_only_hsqc, loader_only_1d, loader_only_H_NMR, loader_only_C_NMR
                     for loader_idx, NMR_type in enumerate(["all_inputs", "HSQC_H_NMR", "HSQC_C_NMR", "only_hsqc", "only_1d", "only_H_NMR", "only_C_NMR"]):
                         model.only_test_this_loader(loader_idx=loader_idx)
-                        # test/rank_1_of_NP_class/Sesterterpenoids/HSQC_C_NMR
-                        NP_classwise_accu = {k.split("/")[-2]:v for k,v in test_result[0].items() if "rank_1_of_NP_class" in k and NMR_type in k}
-                        img_path = pathlib.Path(checkpoint_callback.best_model_path).parents[1] / f"NP_class_accu_{NMR_type}.png"
+                    
                     all_test_results = test_result
-    
-    
+                    all_val_results = val_result
+
                 with open(f"{out_path}/{path1}/{path2}/test_result.pkl", "wb") as f:
                     pickle.dump(all_test_results, f)
-                    
+                with open(f"{out_path}/{path1}/{path2}/val_result.pkl", "wb") as f:
+                    pickle.dump(all_val_results, f)
+                with open(f"{out_path}/{path1}/{path2}/predict_result.pkl", "wb") as f:
+                    pickle.dump(predict_results, f)
                 
-    
+            
+
                 my_logger.info("[Main] Done!")
 
                 for key, value in all_test_results[0].items():
@@ -255,6 +323,12 @@ if __name__ == '__main__':
                 if args['delete_checkpoint']:
                     os.remove(checkpoint_callback.best_model_path)
                     my_logger.info(f"[Main] Deleted checkpoint {checkpoint_callback.best_model_path}")
+                    
+        except Exception as e:
+            if trainer.global_rank == 0:
+                my_logger.error(f"[Main] Exception during training: \n{e}")
+        finally:
+            if trainer.global_rank == 0:
                 os.system(f"cp -r {out_path}/* {out_path_final}/ ")
                 my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
                 logging.shutdown()
