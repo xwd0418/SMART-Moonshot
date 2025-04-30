@@ -71,7 +71,7 @@ class SmartBart(pl.LightningModule):
                 nhead=p_args['num_encoder_heads'],
                 dim_feedforward=p_args['encoder_embed_dim'] * 4,
                 batch_first=True,
-                norm_first=True,
+                # norm_first=True,
                 dropout=p_args['transformer_dropout'],
             )
             self.transformer_encoder = torch.nn.TransformerEncoder(
@@ -108,7 +108,7 @@ class SmartBart(pl.LightningModule):
                 nhead=p_args['num_decoder_heads'], 
                 dim_feedforward=p_args['decoder_embed_dim'] * 4,
                 batch_first=True,
-                norm_first=True,
+                # norm_first=True,
                 dropout=p_args['transformer_dropout'],
             )
             self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=p_args['num_decoder_layers'])
@@ -363,15 +363,7 @@ class SmartBart(pl.LightningModule):
             self.log(k, v, on_epoch=True)
         self.test_step_outputs.clear()
         
-    # def on_predict_epoch_end(self):
-    #     feats = self.predict_step_outputs[0].keys()
-    #     di = {}
-    #     for feat in feats:
-    #         di[f"predict/mean_{feat}"] = torch.stack([v[feat]
-    #                                          for v in self.predict_step_outputs]).mean()
-    #     print(di)
-            
-    #     self.predict_step_outputs.clear()
+
     
     def configure_optimizers(self):
         optim = torch.optim.AdamW(self.parameters(), lr=self.p_args['lr'], 
