@@ -16,7 +16,8 @@ from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 
 from Spectre.models.encoders.encoder_factory import build_encoder
-from Spectre.utils.lr_scheduler import NoamOpt
+from torch.optim.lr_scheduler import LambdaLR
+from torch.optim import AdamW
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -57,6 +58,17 @@ class SmartBart(pl.LightningModule):
             self.transformer_encoder = spectre_model.transformer_encoder
             self.NMR_type_embedding = spectre_model.NMR_type_embedding
             self.latent = spectre_model.latent
+            
+            for param in self.NMR_peak_encoder.parameters():
+                param.requires_grad = False
+            # repeat for others...
+            for param in self.transformer_encoder.parameters():
+                param.requires_grad = False
+            for param in self.NMR_type_embedding.parameters():
+                param.requires_grad = False
+            self.latent.requires_grad = False
+            self.encoder_frozen_until_epoch = p_args['encoder_frozen_until_epoch']
+
         else:
             self.NMR_peak_encoder = build_encoder(
                 coord_enc = "sce", 
@@ -262,7 +274,7 @@ class SmartBart(pl.LightningModule):
         }
         if type(self.test_step_outputs)==list: # adapt for child class: optional_input_ranked_transformer
             self.test_step_outputs.append(metrics)
-        print(f"{truth_smiles=}, {predicted_smiles=}")
+        # print(f"{truth_smiles=}, {predicted_smiles=}")
         return metrics
     
     def predict_step(self,  batch, batch_idx):
@@ -363,22 +375,79 @@ class SmartBart(pl.LightningModule):
             self.log(k, v, on_epoch=True)
         self.test_step_outputs.clear()
         
+    def on_train_epoch_start(self):
+        if self.current_epoch == self.encoder_frozen_until_epoch:
+            print(f"Unfreezing encoder at epoch {self.current_epoch}")
+            for param in self.NMR_peak_encoder.parameters():
+                param.requires_grad = True
+            for param in self.transformer_encoder.parameters():
+                param.requires_grad = True
+            for param in self.NMR_type_embedding.parameters():
+                param.requires_grad = True
+            self.latent.requires_grad = True
 
     
-    def configure_optimizers(self):
-        optim = torch.optim.AdamW(self.parameters(), lr=self.p_args['lr'], 
-                                     weight_decay = self.p_args['weight_decay'], 
-                                     betas=(0.9, 0.98), eps=1e-9
-                                ) 
-        model_size = (self.p_args["encoder_embed_dim"] + self.p_args["decoder_embed_dim"]) // 2
-        scheduler = NoamOpt(model_size, self.p_args['warm_up_steps'], optim, self.p_args['noam_factor'])
+    # def configure_optimizers(self):
+    #     from Spectre.utils.lr_scheduler import NoamOpt
+    #     optim = torch.optim.AdamW(self.parameters(), lr=self.p_args['lr'], 
+    #                                  weight_decay = self.p_args['weight_decay'], 
+    #                                  betas=(0.9, 0.98), eps=1e-9
+    #                             ) 
+    #     model_size = (self.p_args["encoder_embed_dim"] + self.p_args["decoder_embed_dim"]) // 2
+    #     scheduler = NoamOpt(model_size, self.p_args['warm_up_steps'], optim, self.p_args['noam_factor'])
         
+    #     return {
+    #         "optimizer": optim,
+    #         "lr_scheduler": {
+    #             "scheduler": scheduler,
+    #             "interval": "step",
+    #             "frequency": 1,
+    #         }
+    #     }
+    def configure_optimizers(self):
+        # Group encoder vs decoder parameters
+        encoder_params, decoder_params = [], []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if any(k in name for k in ['NMR_peak_encoder', 'transformer_encoder', 'NMR_type_embedding', 'latent']):
+                encoder_params.append(param)
+            else:
+                decoder_params.append(param)
+        print(f"encoder_params: {len(encoder_params)}, decoder_params: {len(decoder_params)}")
+        
+        # Define two learning rates
+        lr_encoder = self.p_args['lr_finetuning'] 
+        lr_decoder = self.p_args['lr']
+
+        # Construct optimizer
+        optimizer = AdamW([
+            {"params": encoder_params, "lr": lr_encoder},
+            {"params": decoder_params, "lr": lr_decoder}
+        ], betas=(0.9, 0.98), eps=1e-9, weight_decay=self.p_args['weight_decay'])
+
+        # Define Noam-style schedulers
+        def noam_lambda(model_size, warmup):
+            def lr_fn(step):
+                step = max(step, 1)
+                return (model_size ** -0.5) * min(step ** -0.5, step * warmup ** -1.5) * self.p_args['noam_factor']
+            return lr_fn
+
+        scheduler = LambdaLR(
+            optimizer,
+            lr_lambda=[
+                noam_lambda(self.p_args['encoder_embed_dim'], self.p_args['warm_up_steps']),
+                noam_lambda(self.p_args['decoder_embed_dim'], self.p_args['warm_up_steps']),
+            ]
+        )
+
         return {
-            "optimizer": optim,
+            "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
                 "interval": "step",
                 "frequency": 1,
+                "name": "noam"
             }
         }
         
@@ -395,6 +464,7 @@ class SmartBart(pl.LightningModule):
         model_name = model_name if len(model_name) == 0 else f"{model_name}_"
         parser = parent_parser.add_argument_group(model_name)
         parser.add_argument(f"--{model_name}lr", type=float, default=1e-5)
+        parser.add_argument(f"--{model_name}lr_finetuning", type=float, default=2e-6)
         parser.add_argument(f"--{model_name}noam_factor", type=float, default=1.0)
         
         if use_small_model:
@@ -431,7 +501,8 @@ class SmartBart(pl.LightningModule):
         parser.add_argument(f"--{model_name}coord_enc", type=str, default="sce")
         parser.add_argument(f"--{model_name}gce_resolution", type=float, default=1)
         
-        parser.add_argument(f"--{model_name}load_encoder", type=bool, default=False)
+        parser.add_argument(f"--{model_name}load_encoder", type=bool, default=True)
+        parser.add_argument(f"--{model_name}encoder_frozen_until_epoch", type=int, default=5)
         parser.add_argument(f"--{model_name}load_decoder", type=bool, default=False)
         # parser.add_argument(f"--{model_name}freeze_weights", type=bool, default=False)
         return parent_parser
