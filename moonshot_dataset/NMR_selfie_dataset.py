@@ -379,5 +379,5 @@ class NMR_Selfie_DataModule(pl.LightningDataModule):
                           num_workers=self.p_args['num_workers'], pin_memory=True, persistent_workers=self.should_persist_workers)
     
     def predict_dataloader(self):
-        return DataLoader(self.test_novel, batch_size=self.batch_size, collate_fn=self.collate_fn, 
+        return DataLoader(self.test_novel, batch_size=1, collate_fn=self.collate_fn, 
                           num_workers=self.p_args['num_workers'], pin_memory=True, persistent_workers=self.should_persist_workers)

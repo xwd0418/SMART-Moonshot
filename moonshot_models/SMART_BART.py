@@ -51,7 +51,8 @@ class SmartBart(pl.LightningModule):
           
         # NMR encoder config
         if p_args['load_encoder']:
-            spectre_model = None
+            from Spectre.inference.inference_utils import choose_model
+            spectre_model = choose_model("optional", load_for_moonshot=True)
             self.NMR_peak_encoder = spectre_model.enc
             self.transformer_encoder = spectre_model.transformer_encoder
             self.NMR_type_embedding = spectre_model.NMR_type_embedding

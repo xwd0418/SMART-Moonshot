@@ -246,7 +246,8 @@ if __name__ == '__main__':
         trainer = pl.Trainer( use_distributed_sampler=False)
         my_logger.info("[Main] Just performing prediction step")
         prediction = trainer.predict(model, data_module)
-        print(prediction)
+        if trainer.global_rank == 0:
+            my_logger.info(f"[Main] Prediction result: {prediction}")
         
     else:
         # training
@@ -275,15 +276,22 @@ if __name__ == '__main__':
                 
             # my_logger.info(f"[Main] my process rank: {os.getpid()}")
             trainer = pl.Trainer( use_distributed_sampler=False) # ensure accurate test results
-            model = model_class.load_from_checkpoint(checkpoint_callback.best_model_path)
+            model = model_class.load_from_checkpoint(checkpoint_path=checkpoint_callback.best_model_path, 
+                                                 selfie_symbol_to_idx = data_module.symbol_to_idx,
+                                                selfie_max_len = SELFIES_MAX_LEN,
+                                                p_args = args,
+            )
             model.validate_with_generation = True
             
+            trainer.strategy.barrier()  
+            predict_results = trainer.predict(model, data_module,)
+            if trainer.global_rank == 0:
+                my_logger.info(f"[Main] Prediction path {checkpoint_callback.best_model_path}!")
+                my_logger.info(f"[Main] Prediction result: {predict_results}")
             trainer.strategy.barrier()  
             val_result = trainer.validate(model, data_module) 
             trainer.strategy.barrier()  
             test_result = trainer.test(model, data_module,)
-            trainer.strategy.barrier()  
-            predict_results = trainer.predict(model, data_module,)
             trainer.strategy.barrier()  
             
             if trainer.global_rank == 0:
