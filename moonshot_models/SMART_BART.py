@@ -70,6 +70,7 @@ class SmartBart(pl.LightningModule):
                 nhead=p_args['num_encoder_heads'],
                 dim_feedforward=p_args['encoder_embed_dim'] * 4,
                 batch_first=True,
+                norm_first=True,
                 dropout=p_args['transformer_dropout'],
             )
             self.transformer_encoder = torch.nn.TransformerEncoder(
@@ -106,6 +107,7 @@ class SmartBart(pl.LightningModule):
                 nhead=p_args['num_decoder_heads'], 
                 dim_feedforward=p_args['decoder_embed_dim'] * 4,
                 batch_first=True,
+                norm_first=True,
                 dropout=p_args['transformer_dropout'],
             )
             self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=p_args['num_decoder_layers'])
@@ -238,11 +240,11 @@ class SmartBart(pl.LightningModule):
     
     def test_step(self, batch, batch_idx):
         NMR, NMR_type_indicator, tgt, truth_smiles, MFPs = batch
-        print(NMR)
-        exit(0)
         # tgt_input = tgt[:, :-1]
         tgt_output = tgt
         logits = self(NMR, NMR_type_indicator)
+        # print(logits)
+        # exit(0)
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
         
         pred_ids = logits.argmax(dim=-1)  # [B, T]
