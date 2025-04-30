@@ -219,7 +219,7 @@ if __name__ == '__main__':
                                                 selfie_max_len = SELFIES_MAX_LEN,
                                                 p_args = args,
         )
-        trainer = pl.Trainer( use_distributed_sampler=False)
+        trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False)
         my_logger.info("[Main] Just performing validation step")
         model.validate_with_generation = True
         trainer.validate(model, data_module)
@@ -230,7 +230,7 @@ if __name__ == '__main__':
                                                 selfie_max_len = SELFIES_MAX_LEN,
                                                 p_args = args,
         )    
-        trainer = pl.Trainer( use_distributed_sampler=False)
+        trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False)
         my_logger.info("[Main] Just performing test step")
         print(f"Checkpoint path: {args['checkpoint_path']}")
         trainer.test(model, data_module)
@@ -243,7 +243,7 @@ if __name__ == '__main__':
                                                 p_args = args,
         )
         
-        trainer = pl.Trainer( use_distributed_sampler=False)
+        trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False)
         my_logger.info("[Main] Just performing prediction step")
         prediction = trainer.predict(model, data_module)
         if trainer.global_rank == 0:
@@ -275,7 +275,7 @@ if __name__ == '__main__':
                
                 
             # my_logger.info(f"[Main] my process rank: {os.getpid()}")
-            trainer = pl.Trainer( use_distributed_sampler=False) # ensure accurate test results
+            trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False) # ensure accurate test results
             model = model_class.load_from_checkpoint(checkpoint_path=checkpoint_callback.best_model_path, 
                                                  selfie_symbol_to_idx = data_module.symbol_to_idx,
                                                 selfie_max_len = SELFIES_MAX_LEN,
