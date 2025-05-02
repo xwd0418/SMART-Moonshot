@@ -98,7 +98,7 @@ class NMR_Selfie_Dataset(Dataset):
         
     def __len__(self):
         if self.p_args['debug'] or self.p_args.get('foldername') == "debug":
-            return 100
+            return 1000
         length = len(self.files)
         if self.p_args['combine_oneD_only_dataset']:
             length += len(self.files_1d)

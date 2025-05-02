@@ -15,10 +15,10 @@ from pytorch_lightning.utilities.model_summary import summarize
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
 from moonshot_models.SMART_BART import SmartBart
-
 from moonshot_dataset.NMR_selfie_dataset import NMR_Selfie_DataModule, SELFIES_MAX_LEN
 import argparse
 from argparse import ArgumentParser
+from moonshot_utils.arg_config import str2bool  
 
 from Spectre.utils.interpret_NMR_input_config_args import parse_nmr_input_types
 # from Spectre.utils import interpret_NMR_input_config_args
@@ -79,16 +79,7 @@ def seed_everything(seed):
     # torch.use_deterministic_algorithms(True)
 
 def add_parser_arguments( parser):
-    def str2bool(v):    
-        # specifically used for arg-paser with boolean values
-        if isinstance(v, bool):
-            return v
-        if v.lower() in ('yes', 'true', 't', 'y', '1'):
-            return True
-        elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-            return False
-        else:
-            raise argparse.ArgumentTypeError('Boolean value expected.')    
+    
         
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--foldername", type=str, default=f"test_run")
@@ -100,7 +91,7 @@ def add_parser_arguments( parser):
     parser.add_argument("--patience", type=int, default=7)
     parser.add_argument("--num_workers", type=int, default=4)
     # for early stopping/model saving
-    parser.add_argument("--metric", type=str, default="val/mean_cosine_similarity") 
+    parser.add_argument("--metric", type=str, default="val/cosine_similarity") 
     parser.add_argument("--metricmode", type=str, default="max")
 
     parser.add_argument("--freeze", type=lambda x:bool(str2bool(x)), default=False)
@@ -156,8 +147,8 @@ if __name__ == '__main__':
     else:
         SmartBart.add_model_specific_args(parser, use_small_model = args["use_small_model"])
         args = vars(parser.parse_known_args()[0])
-        
     args = parse_nmr_input_types(args)
+
 
     seed_everything(seed=args["random_seed"])   
     
@@ -167,7 +158,7 @@ if __name__ == '__main__':
     # Model args
     if args['foldername'] == "debug" or args['debug'] is True:
         args['debug'] = True
-        args["epochs"] = 1
+        args["epochs"] = 10
 
     # Tensorboard setup
     
@@ -213,44 +204,34 @@ if __name__ == '__main__':
     
    
     
-    if args["validate"]:
+    if args["validate"] or args["test"] or args["predict"]:
+        assert os.path.exists(args["checkpoint_path"]), f"Checkpoint path {args['checkpoint_path']} does not exist!"
         model = model_class.load_from_checkpoint(checkpoint_path=args["checkpoint_path"], 
                                                  selfie_symbol_to_idx = data_module.symbol_to_idx,
                                                 selfie_max_len = SELFIES_MAX_LEN,
                                                 p_args = args,
         )
         trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False)
-        my_logger.info("[Main] Just performing validation step")
-        model.validate_with_generation = True
-        trainer.validate(model, data_module)
-               
-    elif args["test"]:
-        model = model_class.load_from_checkpoint(checkpoint_path=args["checkpoint_path"], 
-                                                 selfie_symbol_to_idx = data_module.symbol_to_idx,
-                                                selfie_max_len = SELFIES_MAX_LEN,
-                                                p_args = args,
-        )    
-        trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False)
-        my_logger.info("[Main] Just performing test step")
-        print(f"Checkpoint path: {args['checkpoint_path']}")
-        trainer.test(model, data_module)
         
-    elif args["predict"]:
+        if args["validate"]:
+            my_logger.info("[Main] Just performing validation step")
+            model.validate_with_generation = True
+            trainer.validate(model, data_module)
+                
+        if args["test"]:
+            
+            my_logger.info("[Main] Just performing test step")
+            print(f"Checkpoint path: {args['checkpoint_path']}")
+            trainer.test(model, data_module)
+            
+        if args["predict"]:
+            
+            my_logger.info("[Main] Just performing prediction step")
+            prediction = trainer.predict(model, data_module)
+            if trainer.global_rank == 0:
+                my_logger.info(f"[Main] Prediction result: {prediction}")
         
-        model = model_class.load_from_checkpoint(checkpoint_path=args["checkpoint_path"], 
-                                                 selfie_symbol_to_idx = data_module.symbol_to_idx,
-                                                selfie_max_len = SELFIES_MAX_LEN,
-                                                p_args = args,
-        )
-        
-        trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False)
-        my_logger.info("[Main] Just performing prediction step")
-        prediction = trainer.predict(model, data_module)
-        if trainer.global_rank == 0:
-            my_logger.info(f"[Main] Prediction result: {prediction}")
-        
-    else:
-        # training
+    else: # training
         model = model_class(
             selfie_symbol_to_idx = data_module.symbol_to_idx,
             selfie_max_len = SELFIES_MAX_LEN,
@@ -259,6 +240,7 @@ if __name__ == '__main__':
         my_logger.info(f"[Main] Model Summary: {summarize(model)}")
         
         my_logger.info("[Main] Begin Training!")
+
         trainer = pl.Trainer(
                          max_epochs=args["epochs"],
                          accelerator="auto",
@@ -270,6 +252,10 @@ if __name__ == '__main__':
         try :
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
 
+            if trainer.global_rank == 0:
+                os.system(f"cp -r {out_path}/* {out_path_final}/ ")
+                my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
+                
             # Ensure all processes synchronize before switching to test mode
             trainer.strategy.barrier()               
                
@@ -291,7 +277,8 @@ if __name__ == '__main__':
             trainer.strategy.barrier()  
             val_result = trainer.validate(model, data_module) 
             trainer.strategy.barrier()  
-            test_result = trainer.test(model, data_module,)
+            # test_result = trainer.test(model, data_module,)
+            test_result = [{}] # not testing to save some time
             trainer.strategy.barrier()  
             
             if trainer.global_rank == 0:
@@ -337,8 +324,8 @@ if __name__ == '__main__':
                 my_logger.error(f"[Main] Exception during training: \n{e}")
         finally:
             if trainer.global_rank == 0:
-                os.system(f"cp -r {out_path}/* {out_path_final}/ ")
-                my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
+                os.system(f"cp {out_path}/*.pkl {out_path_final}/")
+                my_logger.info(f"[Main] Copied all test/val/predict pkl files from {out_path} to {out_path_final}")
                 logging.shutdown()
 
 

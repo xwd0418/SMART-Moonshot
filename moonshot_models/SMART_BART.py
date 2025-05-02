@@ -17,9 +17,12 @@ RDLogger.DisableLog('rdApp.*')
 
 from Spectre.models.encoders.encoder_factory import build_encoder
 from torch.optim.lr_scheduler import LambdaLR
+from Spectre.utils.lr_scheduler import NoamOpt
 from torch.optim import AdamW
 
 from concurrent.futures import ThreadPoolExecutor
+import psutil, os
+
 
 # ------------------------ Model ------------------------
 class SmartBart(pl.LightningModule):
@@ -43,15 +46,16 @@ class SmartBart(pl.LightningModule):
             self.idx_to_symbol = pickle.load(f)
         
         # logging 
-        self.validation_step_outputs = []
-        self.training_step_outputs = []
-        self.test_step_outputs = []
+        # self.validation_step_outputs = []
+        # self.training_step_outputs = []
+        # self.test_step_outputs = []
         self.predict_step_outputs = {} # map a molecule to its predicted SMILES 
         
         self.validate_with_generation = False
           
         # NMR encoder config
         if p_args['load_encoder']:
+            
             from Spectre.inference.inference_utils import choose_model
             spectre_model = choose_model("optional", load_for_moonshot=True)
             self.NMR_peak_encoder = spectre_model.enc
@@ -128,7 +132,9 @@ class SmartBart(pl.LightningModule):
             
         self.selfie_padding_idx = selfie_symbol_to_idx['[PAD]']
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.selfie_padding_idx)
-
+        self.automatic_optimization = not self.p_args['use_separate_optimizers']
+        self.unfrozen_step = None
+        
     # def forward(self, src, tgt):
     def encode(self, NMR, NMR_type_indicator, mask=None):
         """
@@ -220,7 +226,33 @@ class SmartBart(pl.LightningModule):
         # print("logits.shape", logits.shape)
         # print("tgt_output.shape", tgt_output.shape)
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
-        self.log("train/loss", loss)
+        
+        # if self.global_rank == 0:
+        #     optimizers = self.optimizers()
+        #     lr_encoder = optimizers.param_groups[0]['lr']
+        #     lr_decoder = optimizers.param_groups[1]['lr']
+        #     print(f"[Epoch {self.current_epoch}] LR: {lr_encoder:.2e}, {lr_decoder:.2e}")
+        
+        # Manual optimization when using separate optimizers
+        if self.p_args['use_separate_optimizers']:
+            opt_encoder, opt_decoder = self.optimizers()
+            # Zero grads
+            opt_encoder.zero_grad()
+            opt_decoder.zero_grad()
+            # Backward pass
+            self.manual_backward(loss)
+            # Step optimizers
+            opt_encoder.step()
+            opt_decoder.step()
+            # Step schedulers if necessary
+            scheds = self.lr_schedulers()
+            if isinstance(scheds, list) and len(scheds) == 2:
+                scheds[0].step()
+                scheds[1].step()
+                print("stepping both schedulers")
+        
+        
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         # print("train_loss", loss)
         return loss
     
@@ -247,17 +279,17 @@ class SmartBart(pl.LightningModule):
             "valid_smiles_rate": valid_smiles_rate,
             "loss": loss,
         }
-        if type(self.validation_step_outputs)==list: # adapt for child class: optional_input_ranked_transformer
-            self.validation_step_outputs.append(metrics)
-        return metrics
+        for k,v in metrics.items():
+            self.log(f"val/{k}", v, on_step=False, on_epoch=True,
+                     prog_bar = k in ["cosine_similarity", "valid_smiles_rate"],
+                     batch_size = NMR.shape[0])
+        # return metrics
     
     def test_step(self, batch, batch_idx):
         NMR, NMR_type_indicator, tgt, truth_smiles, MFPs = batch
         # tgt_input = tgt[:, :-1]
         tgt_output = tgt
         logits = self(NMR, NMR_type_indicator)
-        # print(logits)
-        # exit(0)
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
         
         pred_ids = logits.argmax(dim=-1)  # [B, T]
@@ -272,11 +304,11 @@ class SmartBart(pl.LightningModule):
             "valid_smiles_rate": valid_smiles_rate,
             "loss": loss,
         }
-        if type(self.test_step_outputs)==list: # adapt for child class: optional_input_ranked_transformer
-            self.test_step_outputs.append(metrics)
-        # print(f"{truth_smiles=}, {predicted_smiles=}")
-        return metrics
-    
+        for k,v in metrics.items():
+            self.log(f"test/{k}", v, on_step=False, 
+                     on_epoch=True, prog_bar = False,
+                     batch_size = NMR.shape[0])
+       
     def predict_step(self,  batch, batch_idx):
         NMR, NMR_type_indicator, tgt, truth_smiles, MFPs = batch
         # tgt_input = tgt[:, :-1]
@@ -353,30 +385,11 @@ class SmartBart(pl.LightningModule):
         return predicted_smiles, predicted_mfps.to(self.device)
 
 
-    def on_validation_epoch_end(self):
-        # return
-        feats = self.validation_step_outputs[0].keys()
-        di = {}
-        for feat in feats:
-            di[f"val/mean_{feat}"] = torch.stack([v[feat]
-                                             for v in self.validation_step_outputs]).mean()
-        for k, v in di.items():
-            self.log(k, v, on_epoch=True, prog_bar = k in ["val/mean_cosine_similarity", 
-                                                          "val/mean_valid_smiles_rate"])
-        self.validation_step_outputs.clear()
-        
-    def on_test_epoch_end(self):
-        feats = self.test_step_outputs[0].keys()
-        di = {}
-        for feat in feats:
-            di[f"test/mean_{feat}"] = torch.stack([v[feat]
-                                             for v in self.test_step_outputs]).mean()
-        for k, v in di.items():
-            self.log(k, v, on_epoch=True)
-        self.test_step_outputs.clear()
+
+
         
     def on_train_epoch_start(self):
-        if self.current_epoch == self.encoder_frozen_until_epoch:
+        if self.p_args["load_encoder"] and self.current_epoch == self.encoder_frozen_until_epoch:
             print(f"Unfreezing encoder at epoch {self.current_epoch}")
             for param in self.NMR_peak_encoder.parameters():
                 param.requires_grad = True
@@ -385,10 +398,116 @@ class SmartBart(pl.LightningModule):
             for param in self.NMR_type_embedding.parameters():
                 param.requires_grad = True
             self.latent.requires_grad = True
+            self.unfrozen_step = self.global_step
+
+
+            
 
     
     # def configure_optimizers(self):
-    #     from Spectre.utils.lr_scheduler import NoamOpt
+    #     # Initialize optimizer with a dummy learning rate (1.0)
+    #     # since LambdaLR will multiply this value
+    #     optim = torch.optim.AdamW(self.parameters(), lr=1.0,
+    #                             weight_decay=self.p_args['weight_decay'],
+    #                             betas=(0.9, 0.98), eps=1e-9)
+        
+    #     model_size = (self.p_args["encoder_embed_dim"] + self.p_args["decoder_embed_dim"]) // 2
+        
+    #     # Lambda function to calculate the absolute learning rate,
+    #     # not just a multiplier
+    #     def noam_lambda(step):
+    #         # Add 1 to step to match original implementation
+    #         step += 1
+    #         return self.p_args['noam_factor'] * (model_size ** -0.5) * min(
+    #             step ** -0.5, step * self.p_args['warm_up_steps'] ** -1.5
+    #         )
+        
+    #     scheduler = LambdaLR(optim, lr_lambda=noam_lambda)
+        
+    #     return {
+    #         "optimizer": optim,
+    #         "lr_scheduler": {
+    #             "scheduler": scheduler,
+    #             "interval": "step",
+    #             "frequency": 1,
+    #         }
+    #     }
+        
+    def configure_optimizers(self):
+        # Group encoder vs decoder parameters
+        encoder_params, decoder_params = [], []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if any(k in name for k in ['NMR_peak_encoder', 'transformer_encoder', 'NMR_type_embedding', 'latent']):
+                encoder_params.append(param)
+            else:
+                decoder_params.append(param)
+        print(f"encoder_params: {len(encoder_params)}, decoder_params: {len(decoder_params)}")
+        
+        # Define two learning rates
+        # lr_encoder = self.p_args['lr_finetuning'] 
+        # lr_decoder = self.p_args['lr']
+
+        # Construct optimizer
+        optimizer = AdamW([
+            {"params": encoder_params, "lr": 1},
+            {"params": decoder_params, "lr": 1}
+        ], betas=(0.9, 0.98), eps=1e-9, weight_decay=self.p_args['weight_decay'])
+
+
+        model_size = (self.p_args["encoder_embed_dim"] + self.p_args["decoder_embed_dim"]) // 2
+        
+    
+        # Define Noam-style schedulers
+        # def noam_lambda(model_size, warmup):
+            # def lr_fn(step):
+            #     step = max(step, 1)
+            #     return (model_size ** -0.5) * min(step ** -0.5, step * warmup ** -1.5) * self.p_args['noam_factor']
+            # return lr_fn
+        
+        # Lambda function to calculate the absolute learning rate,
+        # not just a multiplier
+        def noam_lambda(step):
+            step += 1
+            return self.p_args['noam_factor'] * (model_size ** -0.5) * min(
+                step ** -0.5, step * self.p_args['warm_up_steps'] ** -1.5
+            )
+        def noam_since(step):
+            if self.unfrozen_step is None:
+                return 0 # not yet unfrozen)
+            step -= self.unfrozen_step
+            # print(f"step: {step}")
+            return self.p_args['noam_factor'] * (model_size ** -0.5) * min(
+                step ** -0.5, step * self.p_args['warm_up_steps'] ** -1.5
+            )
+
+        scheduler = LambdaLR(
+            optimizer,
+            lr_lambda=[
+                noam_since,
+                noam_lambda,
+            ]
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+                "name": "noam"
+            }
+        }
+    
+    
+    # def configure_optimizers(self):
+    #     if self.p_args['use_separate_optimizers']:
+    #         return self.configure_separate_optimizers()
+    #     else:
+    #         return self.configure_single_optimizer()
+        
+    # def configure_single_optimizer(self):
     #     optim = torch.optim.AdamW(self.parameters(), lr=self.p_args['lr'], 
     #                                  weight_decay = self.p_args['weight_decay'], 
     #                                  betas=(0.9, 0.98), eps=1e-9
@@ -404,52 +523,57 @@ class SmartBart(pl.LightningModule):
     #             "frequency": 1,
     #         }
     #     }
-    def configure_optimizers(self):
-        # Group encoder vs decoder parameters
-        encoder_params, decoder_params = [], []
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if any(k in name for k in ['NMR_peak_encoder', 'transformer_encoder', 'NMR_type_embedding', 'latent']):
-                encoder_params.append(param)
-            else:
-                decoder_params.append(param)
-        print(f"encoder_params: {len(encoder_params)}, decoder_params: {len(decoder_params)}")
         
-        # Define two learning rates
-        lr_encoder = self.p_args['lr_finetuning'] 
-        lr_decoder = self.p_args['lr']
+    # def configure_separate_optimizers(self):
+    #     # Separate encoder and decoder parameters
+    #     encoder_params, decoder_params = [], []
+    #     for name, param in self.named_parameters():
+    #         if not param.requires_grad:
+    #             continue
+    #         if any(k in name for k in ['NMR_peak_encoder', 'transformer_encoder', 'NMR_type_embedding', 'latent']):
+    #             encoder_params.append(param)
+    #         else:
+    #             decoder_params.append(param)
+    #     print(f"encoder_params: {len(encoder_params)}, decoder_params: {len(decoder_params)}")
 
-        # Construct optimizer
-        optimizer = AdamW([
-            {"params": encoder_params, "lr": lr_encoder},
-            {"params": decoder_params, "lr": lr_decoder}
-        ], betas=(0.9, 0.98), eps=1e-9, weight_decay=self.p_args['weight_decay'])
+    #     # Learning rates
+    #     lr_encoder = self.p_args['lr_finetuning']
+    #     lr_decoder = self.p_args['lr']
 
-        # Define Noam-style schedulers
-        def noam_lambda(model_size, warmup):
-            def lr_fn(step):
-                step = max(step, 1)
-                return (model_size ** -0.5) * min(step ** -0.5, step * warmup ** -1.5) * self.p_args['noam_factor']
-            return lr_fn
+    #     # Build separate optimizers
+    #     encoder_optim = AdamW(encoder_params, lr=lr_encoder, betas=(0.9, 0.98), eps=1e-9, weight_decay=self.p_args['weight_decay'])
+    #     decoder_optim = AdamW(decoder_params, lr=lr_decoder, betas=(0.9, 0.98), eps=1e-9, weight_decay=self.p_args['weight_decay'])
 
-        scheduler = LambdaLR(
-            optimizer,
-            lr_lambda=[
-                noam_lambda(self.p_args['encoder_embed_dim'], self.p_args['warm_up_steps']),
-                noam_lambda(self.p_args['decoder_embed_dim'], self.p_args['warm_up_steps']),
-            ]
-        )
+    #     # Model sizes
+    #     encoder_dim = self.p_args['encoder_embed_dim']
+    #     decoder_dim = self.p_args['decoder_embed_dim']
+    #     warmup_steps = self.p_args['warm_up_steps']
+    #     factor = self.p_args['noam_factor']
 
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-                "frequency": 1,
-                "name": "noam"
-            }
-        }
+    #     # Wrap with NoamOpt
+    #     encoder_scheduler = NoamOpt(encoder_dim, warmup_steps, encoder_optim, factor)
+    #     decoder_scheduler = NoamOpt(decoder_dim, warmup_steps, decoder_optim, factor)
+
+    #     return [
+    #         {
+    #             "optimizer": encoder_optim,
+    #             "lr_scheduler": {
+    #                 "scheduler": encoder_scheduler,
+    #                 "interval": "step",
+    #                 "frequency": 1,
+    #                 "name": "encoder_noam"
+    #             }
+    #         },
+    #         {
+    #             "optimizer": decoder_optim,
+    #             "lr_scheduler": {
+    #                 "scheduler": decoder_scheduler,
+    #                 "interval": "step",
+    #                 "frequency": 1,
+    #                 "name": "decoder_noam"
+    #             }
+    #         }
+    #     ]
         
     def log(self, name, value, *args, **kwargs):
         # Set 'sync_dist' to True by default
@@ -461,6 +585,8 @@ class SmartBart(pl.LightningModule):
     
     @staticmethod
     def add_model_specific_args(parent_parser, use_small_model = False, model_name=""):
+        from moonshot_utils.arg_config import str2bool  
+        
         model_name = model_name if len(model_name) == 0 else f"{model_name}_"
         parser = parent_parser.add_argument_group(model_name)
         parser.add_argument(f"--{model_name}lr", type=float, default=1e-5)
@@ -501,9 +627,11 @@ class SmartBart(pl.LightningModule):
         parser.add_argument(f"--{model_name}coord_enc", type=str, default="sce")
         parser.add_argument(f"--{model_name}gce_resolution", type=float, default=1)
         
-        parser.add_argument(f"--{model_name}load_encoder", type=bool, default=True)
+        parser.add_argument(f"--{model_name}load_encoder", type=lambda x:bool(str2bool(x)), default=True)
         parser.add_argument(f"--{model_name}encoder_frozen_until_epoch", type=int, default=5)
-        parser.add_argument(f"--{model_name}load_decoder", type=bool, default=False)
-        # parser.add_argument(f"--{model_name}freeze_weights", type=bool, default=False)
+        parser.add_argument(f"--{model_name}load_decoder", type=lambda x:bool(str2bool(x)), default=False)
+        
+        parser.add_argument(f"--{model_name}use_separate_optimizers", type=lambda x:bool(str2bool(x)), default=False)
+        # parser.add_argument(f"--{model_name}freeze_weights", type=lambda x:bool(str2bool(x)), default=False)
         return parent_parser
     
