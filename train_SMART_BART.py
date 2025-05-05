@@ -128,9 +128,8 @@ def add_parser_arguments( parser):
     parser.add_argument("--random_seed", type=int, default=42)
 
     
-if __name__ == '__main__':
+def main():
     torch.set_float32_matmul_precision('medium')
-
     # dependencies: hyun_fp_data, hyun_pair_ranking_set_07_22
     parser = ArgumentParser(add_help=True)
     add_parser_arguments(parser)
@@ -163,7 +162,6 @@ if __name__ == '__main__':
     # Tensorboard setup
     
     out_path       =       DATASET_root_path / f"Moonshot/{curr_exp_folder_name}"
-    # out_path =            f"/root/gurusmart/MorganFP_prediction/reproduce_previous_works/{curr_exp_folder_name}"
     out_path_final =      f"/root/gurusmart/Moonshot/{curr_exp_folder_name}"
     os.makedirs(out_path_final, exist_ok=True)
     os.makedirs(out_path, exist_ok=True)
@@ -248,6 +246,7 @@ if __name__ == '__main__':
                          callbacks=[early_stopping, lr_monitor, checkpoint_callback],
                         #  strategy="fsdp" if torch.cuda.device_count() > 1 else "auto",
                          accumulate_grad_batches=args["accumulate_grad_batches_num"],
+                        #  gradient_clip_val=1.0,
         )
         try :
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
@@ -256,9 +255,19 @@ if __name__ == '__main__':
                 os.system(f"cp -r {out_path}/* {out_path_final}/ ")
                 my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
                 
+            if args['debug']:
+                my_logger.info(f"[Main] Debug mode, not running test/predict")
+                return
             # Ensure all processes synchronize before switching to test mode
             trainer.strategy.barrier()               
                
+            # --- CLEANUP: release GPU memory used during training ---
+            model.to('cpu')       # move model off GPU
+            del model             # delete model
+            del trainer           # delete trainer
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
                 
             # my_logger.info(f"[Main] my process rank: {os.getpid()}")
             trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False) # ensure accurate test results
@@ -324,10 +333,11 @@ if __name__ == '__main__':
                 my_logger.error(f"[Main] Exception during training: \n{e}")
         finally:
             if trainer.global_rank == 0:
-                os.system(f"cp {out_path}/*.pkl {out_path_final}/")
+                os.system(f"cp -r {out_path}/* {out_path_final}/ ")
                 my_logger.info(f"[Main] Copied all test/val/predict pkl files from {out_path} to {out_path_final}")
                 logging.shutdown()
 
 
 
-    
+if __name__ == '__main__':
+    main()

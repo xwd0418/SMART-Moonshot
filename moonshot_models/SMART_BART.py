@@ -437,14 +437,22 @@ class SmartBart(pl.LightningModule):
         # Group encoder vs decoder parameters
         encoder_params, decoder_params = [], []
         for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
             if any(k in name for k in ['NMR_peak_encoder', 'transformer_encoder', 'NMR_type_embedding', 'latent']):
                 encoder_params.append(param)
+                # if self.global_rank == 0:
+                #     print(f"encoder_params: {name}")
+                    
+            elif not param.requires_grad:
+                # if self.global_rank == 0:
+                #     print(f"skipping {name}")
+                continue
             else:
+                # if self.global_rank == 0:
+                #     print(f"decoder_params: {name}")
                 decoder_params.append(param)
         print(f"encoder_params: {len(encoder_params)}, decoder_params: {len(decoder_params)}")
-        
+      
+        # exit(0)
         # Define two learning rates
         # lr_encoder = self.p_args['lr_finetuning'] 
         # lr_decoder = self.p_args['lr']
@@ -628,7 +636,7 @@ class SmartBart(pl.LightningModule):
         parser.add_argument(f"--{model_name}gce_resolution", type=float, default=1)
         
         parser.add_argument(f"--{model_name}load_encoder", type=lambda x:bool(str2bool(x)), default=True)
-        parser.add_argument(f"--{model_name}encoder_frozen_until_epoch", type=int, default=5)
+        parser.add_argument(f"--{model_name}encoder_frozen_until_epoch", type=int, default=4)
         parser.add_argument(f"--{model_name}load_decoder", type=lambda x:bool(str2bool(x)), default=False)
         
         parser.add_argument(f"--{model_name}use_separate_optimizers", type=lambda x:bool(str2bool(x)), default=False)
