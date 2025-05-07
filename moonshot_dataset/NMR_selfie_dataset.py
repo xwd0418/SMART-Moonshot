@@ -208,7 +208,13 @@ class NMR_Selfie_Dataset(Dataset):
         
         smiles = smiles_dict[int(dataset_files[i].split(".")[0])] 
         try :
-            selfies_str = selfies.encoder(smiles)   
+            
+            if self.split == "train" :
+                mol = Chem.MolFromSmiles(smiles)
+                smiles_to_get_selfie = Chem.MolToSmiles(mol, canonical=False, doRandom=True)
+            else:
+                smiles_to_get_selfie = smiles
+            selfies_str = selfies.encoder(smiles_to_get_selfie)   
         except:
             return None
         encoded_selfie = [self.symbol_to_idx[symbol] for symbol in selfies.split_selfies(selfies_str)] 

@@ -132,7 +132,6 @@ class SmartBart(pl.LightningModule):
             
         self.selfie_padding_idx = selfie_symbol_to_idx['[PAD]']
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.selfie_padding_idx)
-        self.automatic_optimization = not self.p_args['use_separate_optimizers']
         self.unfrozen_step = None
         
     # def forward(self, src, tgt):
@@ -233,23 +232,23 @@ class SmartBart(pl.LightningModule):
         #     lr_decoder = optimizers.param_groups[1]['lr']
         #     print(f"[Epoch {self.current_epoch}] LR: {lr_encoder:.2e}, {lr_decoder:.2e}")
         
-        # Manual optimization when using separate optimizers
-        if self.p_args['use_separate_optimizers']:
-            opt_encoder, opt_decoder = self.optimizers()
-            # Zero grads
-            opt_encoder.zero_grad()
-            opt_decoder.zero_grad()
-            # Backward pass
-            self.manual_backward(loss)
-            # Step optimizers
-            opt_encoder.step()
-            opt_decoder.step()
-            # Step schedulers if necessary
-            scheds = self.lr_schedulers()
-            if isinstance(scheds, list) and len(scheds) == 2:
-                scheds[0].step()
-                scheds[1].step()
-                print("stepping both schedulers")
+        # # Manual optimization when using separate optimizers
+        # if self.p_args['use_separate_optimizers']:
+        #     opt_encoder, opt_decoder = self.optimizers()
+        #     # Zero grads
+        #     opt_encoder.zero_grad()
+        #     opt_decoder.zero_grad()
+        #     # Backward pass
+        #     self.manual_backward(loss)
+        #     # Step optimizers
+        #     opt_encoder.step()
+        #     opt_decoder.step()
+        #     # Step schedulers if necessary
+        #     scheds = self.lr_schedulers()
+        #     if isinstance(scheds, list) and len(scheds) == 2:
+        #         scheds[0].step()
+        #         scheds[1].step()
+        #         print("stepping both schedulers")
         
         
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
@@ -281,7 +280,7 @@ class SmartBart(pl.LightningModule):
         }
         for k,v in metrics.items():
             self.log(f"val/{k}", v, on_step=False, on_epoch=True,
-                     prog_bar = k in ["cosine_similarity", "valid_smiles_rate"],
+                     prog_bar = True,
                      batch_size = NMR.shape[0])
         # return metrics
     
@@ -434,6 +433,8 @@ class SmartBart(pl.LightningModule):
     #     }
         
     def configure_optimizers(self):
+        if self.p_args['use_single_scheduler']:
+            return self.configure_optimizers_single_scheduler()
         # Group encoder vs decoder parameters
         encoder_params, decoder_params = [], []
         for name, param in self.named_parameters():
@@ -459,7 +460,7 @@ class SmartBart(pl.LightningModule):
 
         # Construct optimizer
         optimizer = AdamW([
-            {"params": encoder_params, "lr": 1},
+            {"params": encoder_params, "lr": 1}, # lr is in fact controled by the scheduler (noam_factor)
             {"params": decoder_params, "lr": 1}
         ], betas=(0.9, 0.98), eps=1e-9, weight_decay=self.p_args['weight_decay'])
 
@@ -476,25 +477,25 @@ class SmartBart(pl.LightningModule):
         
         # Lambda function to calculate the absolute learning rate,
         # not just a multiplier
-        def noam_lambda(step):
+        def noam_decoder(step):
             step += 1
-            return self.p_args['noam_factor'] * (model_size ** -0.5) * min(
+            return self.p_args['noam_factor_decoder'] * (model_size ** -0.5) * min(
                 step ** -0.5, step * self.p_args['warm_up_steps'] ** -1.5
             )
-        def noam_since(step):
+        def noam_encoder(step):
             if self.unfrozen_step is None:
                 return 0 # not yet unfrozen)
             step -= self.unfrozen_step
             # print(f"step: {step}")
-            return self.p_args['noam_factor'] * (model_size ** -0.5) * min(
+            return self.p_args['noam_factor_encoder'] * (model_size ** -0.5) * min(
                 step ** -0.5, step * self.p_args['warm_up_steps'] ** -1.5
             )
 
         scheduler = LambdaLR(
             optimizer,
             lr_lambda=[
-                noam_since,
-                noam_lambda,
+                noam_encoder,
+                noam_decoder,
             ]
         )
 
@@ -513,24 +514,33 @@ class SmartBart(pl.LightningModule):
     #     if self.p_args['use_separate_optimizers']:
     #         return self.configure_separate_optimizers()
     #     else:
-    #         return self.configure_single_optimizer()
+    #         return self.configure_optimizers_single_scheduler()
         
-    # def configure_single_optimizer(self):
-    #     optim = torch.optim.AdamW(self.parameters(), lr=self.p_args['lr'], 
-    #                                  weight_decay = self.p_args['weight_decay'], 
-    #                                  betas=(0.9, 0.98), eps=1e-9
-    #                             ) 
-    #     model_size = (self.p_args["encoder_embed_dim"] + self.p_args["decoder_embed_dim"]) // 2
-    #     scheduler = NoamOpt(model_size, self.p_args['warm_up_steps'], optim, self.p_args['noam_factor'])
+    def configure_optimizers_single_scheduler(self):
+        optim = torch.optim.AdamW(self.parameters(), lr=1, 
+                                     weight_decay = self.p_args['weight_decay'], 
+                                     betas=(0.9, 0.98), eps=1e-9
+                                ) 
+        model_size = (self.p_args["encoder_embed_dim"] + self.p_args["decoder_embed_dim"]) // 2
         
-    #     return {
-    #         "optimizer": optim,
-    #         "lr_scheduler": {
-    #             "scheduler": scheduler,
-    #             "interval": "step",
-    #             "frequency": 1,
-    #         }
-    #     }
+        def noam_sch(step):
+            step += 1
+            return self.p_args['noam_factor_decoder'] * (model_size ** -0.5) * min(
+                step ** -0.5, step * self.p_args['warm_up_steps'] ** -1.5
+            )
+        # scheduler = NoamOpt(model_size, self.p_args['warm_up_steps'], optim, self.p_args['noam_factor'])
+        scheduler = LambdaLR(
+            optim,
+            lr_lambda=noam_sch
+        )
+        return {
+            "optimizer": optim,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            }
+        }
         
     # def configure_separate_optimizers(self):
     #     # Separate encoder and decoder parameters
@@ -599,7 +609,8 @@ class SmartBart(pl.LightningModule):
         parser = parent_parser.add_argument_group(model_name)
         parser.add_argument(f"--{model_name}lr", type=float, default=1e-5)
         parser.add_argument(f"--{model_name}lr_finetuning", type=float, default=2e-6)
-        parser.add_argument(f"--{model_name}noam_factor", type=float, default=1.0)
+        parser.add_argument(f"--{model_name}noam_factor_encoder", type=float, default=0.1)
+        parser.add_argument(f"--{model_name}noam_factor_decoder", type=float, default=1.0)
         
         if use_small_model:
             parser.add_argument(f"--{model_name}dim_coords", metavar='N',
@@ -636,9 +647,10 @@ class SmartBart(pl.LightningModule):
         parser.add_argument(f"--{model_name}gce_resolution", type=float, default=1)
         
         parser.add_argument(f"--{model_name}load_encoder", type=lambda x:bool(str2bool(x)), default=True)
-        parser.add_argument(f"--{model_name}encoder_frozen_until_epoch", type=int, default=4)
+        parser.add_argument(f"--{model_name}encoder_frozen_until_epoch", type=int, default=10)
         parser.add_argument(f"--{model_name}load_decoder", type=lambda x:bool(str2bool(x)), default=False)
         
+        parser.add_argument(f"--{model_name}use_single_scheduler", type=lambda x:bool(str2bool(x)), default=False)
         parser.add_argument(f"--{model_name}use_separate_optimizers", type=lambda x:bool(str2bool(x)), default=False)
         # parser.add_argument(f"--{model_name}freeze_weights", type=lambda x:bool(str2bool(x)), default=False)
         return parent_parser

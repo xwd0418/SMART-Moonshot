@@ -2,7 +2,7 @@ import pathlib
 import yaml
 
 DATASET_root_path = pathlib.Path("/workspace/")
-curr_exp_folder_name = "initial_experiments"
+curr_exp_folder_name = "random_smiles_variant"
 
 import logging, os, sys, torch
 import random, pickle
@@ -91,8 +91,8 @@ def add_parser_arguments( parser):
     parser.add_argument("--patience", type=int, default=7)
     parser.add_argument("--num_workers", type=int, default=4)
     # for early stopping/model saving
-    parser.add_argument("--metric", type=str, default="val/cosine_similarity") 
-    parser.add_argument("--metricmode", type=str, default="max")
+    parser.add_argument("--metric", type=str, default="val/loss") #cosine_similarity
+    parser.add_argument("--metricmode", type=str, default="min")
 
     parser.add_argument("--freeze", type=lambda x:bool(str2bool(x)), default=False)
     parser.add_argument("--train", type=lambda x:bool(str2bool(x)), default=True)
@@ -270,7 +270,7 @@ def main():
             torch.cuda.empty_cache()
                 
             # my_logger.info(f"[Main] my process rank: {os.getpid()}")
-            trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False) # ensure accurate test results
+            trainer = pl.Trainer(logger=False, use_distributed_sampler=False) # ensure accurate test results
             model = model_class.load_from_checkpoint(checkpoint_path=checkpoint_callback.best_model_path, 
                                                  selfie_symbol_to_idx = data_module.symbol_to_idx,
                                                 selfie_max_len = SELFIES_MAX_LEN,
