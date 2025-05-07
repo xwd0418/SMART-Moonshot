@@ -192,6 +192,8 @@ class SmartBart(pl.LightningModule):
         else:
             tgt = self.dec_start_token.expand(memory.size(0), 1,-1)
             dec_output_logits = []
+            finished = torch.zeros(memory.size(0), dtype=torch.bool, device=memory.device)
+
             for i in range(self.max_len):
                 out = self.decoder(
                     tgt, 
@@ -204,7 +206,22 @@ class SmartBart(pl.LightningModule):
                 dec_logits[:,0] = float('-inf')
                 
                 dec_output_logits.append(dec_logits)
-                next_embedded_token = self.decoder_embedding(torch.argmax(dec_logits, dim=1)).unsqueeze(1) + self.pos_embedding[:, i, :]
+                
+                next_token_ids = torch.argmax(dec_logits, dim=1)  # (B,)
+                finished |= (next_token_ids == self.selfie_padding_idx)
+                if finished.all():
+                    # If all sequences are done, pad the rest
+                    remaining_len = self.max_len - (i + 1)
+                    pad_logits = torch.full(
+                        (remaining_len, memory.size(0), dec_logits.size(-1)),
+                        fill_value=float('-inf'),
+                        device=memory.device
+                    )
+                    pad_logits[:, :, self.selfie_padding_idx] = 0.0  # Logits for PAD token only
+                    dec_output_logits.extend(pad_logits.permute(1, 0, 2))  # add along time
+                    break
+        
+                next_embedded_token = self.decoder_embedding(next_token_ids).unsqueeze(1) + self.pos_embedding[:, i, :]
                 
                 tgt = torch.cat([tgt, next_embedded_token], dim=1)
                 
