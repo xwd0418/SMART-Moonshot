@@ -28,7 +28,7 @@ class NMR_Selfie_Dataset(Dataset):
         self.symbol_to_idx = symbol_to_idx
         self.max_len_selfies = SELFIES_MAX_LEN
         if p_args['random_smiles']:
-            SELFIES_MAX_LEN = 600
+            self.max_len_selfies = 600
         self.p_args = p_args
         logger = logging.getLogger("lightning")
 

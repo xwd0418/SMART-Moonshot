@@ -162,7 +162,10 @@ def main():
         args["epochs"] = 10
 
     if args['random_smiles']:
-        SELFIES_MAX_LEN = 600
+        
+        model_selfie_len = 600
+    else:
+        model_selfie_len = SELFIES_MAX_LEN
         
     # Tensorboard setup
     
@@ -211,7 +214,7 @@ def main():
         assert os.path.exists(args["checkpoint_path"]), f"Checkpoint path {args['checkpoint_path']} does not exist!"
         model = model_class.load_from_checkpoint(checkpoint_path=args["checkpoint_path"], 
                                                  selfie_symbol_to_idx = data_module.symbol_to_idx,
-                                                selfie_max_len = SELFIES_MAX_LEN,
+                                                selfie_max_len = model_selfie_len,
                                                 p_args = args,
         )
         trainer = pl.Trainer(logger=tbl,  use_distributed_sampler=False)
@@ -237,7 +240,7 @@ def main():
     else: # training
         model = model_class(
             selfie_symbol_to_idx = data_module.symbol_to_idx,
-            selfie_max_len = SELFIES_MAX_LEN,
+            selfie_max_len = model_selfie_len,
             p_args = args,
         )
         my_logger.info(f"[Main] Model Summary: {summarize(model)}")
@@ -253,7 +256,7 @@ def main():
                          accumulate_grad_batches=args["accumulate_grad_batches_num"],
                          gradient_clip_val=args["gradient_clip_val"],
         )
-        try :
+        if 1:
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
 
             if trainer.global_rank == 0:
@@ -278,7 +281,7 @@ def main():
             trainer = pl.Trainer(logger=False, use_distributed_sampler=False) # ensure accurate test results
             model = model_class.load_from_checkpoint(checkpoint_path=checkpoint_callback.best_model_path, 
                                                  selfie_symbol_to_idx = data_module.symbol_to_idx,
-                                                selfie_max_len = SELFIES_MAX_LEN,
+                                                selfie_max_len = model_selfie_len,
                                                 p_args = args,
             )
             model.validate_with_generation = True
@@ -333,14 +336,14 @@ def main():
                     os.remove(checkpoint_callback.best_model_path)
                     my_logger.info(f"[Main] Deleted checkpoint {checkpoint_callback.best_model_path}")
                     
-        except Exception as e:
-            if trainer.global_rank == 0:
-                my_logger.error(f"[Main] Exception during training: \n{e}")
-        finally:
-            if trainer.global_rank == 0:
-                os.system(f"cp -r {out_path}/* {out_path_final}/ ")
-                my_logger.info(f"[Main] Copied all test/val/predict pkl files from {out_path} to {out_path_final}")
-                logging.shutdown()
+        # except Exception as e:
+        #     if trainer.global_rank == 0:
+        #         my_logger.error(f"[Main] Exception during training: \n{e}")
+        # finally:
+        #     if trainer.global_rank == 0:
+        #         os.system(f"cp -r {out_path}/* {out_path_final}/ ")
+        #         my_logger.info(f"[Main] Copied all test/val/predict pkl files from {out_path} to {out_path_final}")
+        #         logging.shutdown()
 
 
 
