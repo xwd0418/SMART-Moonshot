@@ -2,7 +2,7 @@ import pathlib
 import yaml
 
 DATASET_root_path = pathlib.Path("/workspace/")
-curr_exp_folder_name = "random_smiles_variant"
+curr_exp_folder_name = "give_up_multiple_schedulers"
 
 import logging, os, sys, torch
 import random, pickle
@@ -91,8 +91,9 @@ def add_parser_arguments( parser):
     parser.add_argument("--patience", type=int, default=7)
     parser.add_argument("--num_workers", type=int, default=4)
     # for early stopping/model saving
-    parser.add_argument("--metric", type=str, default="val/loss") #cosine_similarity
-    parser.add_argument("--metricmode", type=str, default="min")
+    parser.add_argument("--metric", type=str, default="val/cosine_similarity") #cosine_similarity
+    parser.add_argument("--metricmode", type=str, default="max")
+    parser.add_argument("--gradient_clip_val", type=float, default=None)
 
     parser.add_argument("--freeze", type=lambda x:bool(str2bool(x)), default=False)
     parser.add_argument("--train", type=lambda x:bool(str2bool(x)), default=True)
@@ -109,6 +110,7 @@ def add_parser_arguments( parser):
     
     parser.add_argument("--use_Jaccard",  type=lambda x:bool(str2bool(x)), default=False, help="using Jaccard similarity instead of cosine similarity")
     parser.add_argument("--jittering",  type=float, default=1.0, help="a data augmentation technique that jitters the peaks. Choose 'normal' or 'uniform' to choose jittering distribution" )
+    parser.add_argument("--random_smiles",  type=lambda x:bool(str2bool(x)), default=False, help="randomize the SMILES, and therefore selfie, input during training")
 
     # control inputs
     parser.add_argument("--optional_inputs",  type=lambda x:bool(str2bool(x)), default=False, help="use optional 2D input, inference will contain different input versions")
@@ -159,6 +161,9 @@ def main():
         args['debug'] = True
         args["epochs"] = 10
 
+    if args['random_smiles']:
+        SELFIES_MAX_LEN = 600
+        
     # Tensorboard setup
     
     out_path       =       DATASET_root_path / f"Moonshot/{curr_exp_folder_name}"
@@ -246,7 +251,7 @@ def main():
                          callbacks=[early_stopping, lr_monitor, checkpoint_callback],
                         #  strategy="fsdp" if torch.cuda.device_count() > 1 else "auto",
                          accumulate_grad_batches=args["accumulate_grad_batches_num"],
-                        #  gradient_clip_val=1.0,
+                         gradient_clip_val=args["gradient_clip_val"],
         )
         try :
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])

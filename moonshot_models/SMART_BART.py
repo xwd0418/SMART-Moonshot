@@ -625,7 +625,7 @@ class SmartBart(pl.LightningModule):
         model_name = model_name if len(model_name) == 0 else f"{model_name}_"
         parser = parent_parser.add_argument_group(model_name)
         parser.add_argument(f"--{model_name}lr", type=float, default=1e-5)
-        parser.add_argument(f"--{model_name}lr_finetuning", type=float, default=2e-6)
+        # parser.add_argument(f"--{model_name}lr_finetuning", type=float, default=2e-6)
         parser.add_argument(f"--{model_name}noam_factor_encoder", type=float, default=0.1)
         parser.add_argument(f"--{model_name}noam_factor_decoder", type=float, default=1.0)
         

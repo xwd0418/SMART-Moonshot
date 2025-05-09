@@ -27,6 +27,8 @@ class NMR_Selfie_Dataset(Dataset):
         self.input_src = input_src
         self.symbol_to_idx = symbol_to_idx
         self.max_len_selfies = SELFIES_MAX_LEN
+        if p_args['random_smiles']:
+            SELFIES_MAX_LEN = 600
         self.p_args = p_args
         logger = logging.getLogger("lightning")
 
@@ -209,7 +211,7 @@ class NMR_Selfie_Dataset(Dataset):
         smiles = smiles_dict[int(dataset_files[i].split(".")[0])] 
         try :
             
-            if self.split == "train" :
+            if self.split == "train" and self.p_args['random_smiles'] > 0:
                 mol = Chem.MolFromSmiles(smiles)
                 smiles_to_get_selfie = Chem.MolToSmiles(mol, canonical=False, doRandom=True)
             else:
