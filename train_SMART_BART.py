@@ -256,13 +256,14 @@ def main():
                          accumulate_grad_batches=args["accumulate_grad_batches_num"],
                          gradient_clip_val=args["gradient_clip_val"],
         )
-        if 1:
+        try
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
 
             if trainer.global_rank == 0:
                 os.system(f"cp -r {out_path}/* {out_path_final}/ ")
                 my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
-                
+                my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
+            
             if args['debug']:
                 my_logger.info(f"[Main] Debug mode, not running test/predict")
                 return
@@ -299,7 +300,7 @@ def main():
             trainer.strategy.barrier()  
             
             if trainer.global_rank == 0:
-                my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
+                # my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
                 my_logger.info(f"[Main] Testing path {checkpoint_callback.best_model_path}!")
                 all_test_results = [{}]
                 all_val_results = [{}]
@@ -336,14 +337,14 @@ def main():
                     os.remove(checkpoint_callback.best_model_path)
                     my_logger.info(f"[Main] Deleted checkpoint {checkpoint_callback.best_model_path}")
                     
-        # except Exception as e:
-        #     if trainer.global_rank == 0:
-        #         my_logger.error(f"[Main] Exception during training: \n{e}")
-        # finally:
-        #     if trainer.global_rank == 0:
-        #         os.system(f"cp -r {out_path}/* {out_path_final}/ ")
-        #         my_logger.info(f"[Main] Copied all test/val/predict pkl files from {out_path} to {out_path_final}")
-        #         logging.shutdown()
+        except Exception as e:
+            if trainer.global_rank == 0:
+                my_logger.error(f"[Main] Exception during training: \n{e}")
+        finally:
+            if trainer.global_rank == 0:
+                os.system(f"cp -r {out_path}/* {out_path_final}/ ")
+                my_logger.info(f"[Main] Copied all test/val/predict pkl files from {out_path} to {out_path_final}")
+                logging.shutdown()
 
 
 
