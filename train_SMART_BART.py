@@ -2,7 +2,7 @@ import pathlib
 import yaml
 
 DATASET_root_path = pathlib.Path("/workspace/")
-curr_exp_folder_name = "give_up_multiple_schedulers"
+curr_exp_folder_name = "freeze_except_last_two_layers"
 
 import logging, os, sys, torch
 import random, pickle
@@ -228,7 +228,10 @@ def main():
             
             my_logger.info("[Main] Just performing test step")
             print(f"Checkpoint path: {args['checkpoint_path']}")
-            trainer.test(model, data_module)
+            result = trainer.test(model, data_module)
+            if trainer.global_rank == 0:
+                with open("/root/gurusmart/Moonshot/give_up_multiple_schedulers/compare_unfreeze/only_hsqc_1_from_scratch/test_result.pkl", "wb") as f:
+                    pickle.dump(result, f)
             
         if args["predict"]:
             
@@ -256,7 +259,7 @@ def main():
                          accumulate_grad_batches=args["accumulate_grad_batches_num"],
                          gradient_clip_val=args["gradient_clip_val"],
         )
-        try
+        try:
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
 
             if trainer.global_rank == 0:
@@ -295,8 +298,8 @@ def main():
             trainer.strategy.barrier()  
             val_result = trainer.validate(model, data_module) 
             trainer.strategy.barrier()  
-            # test_result = trainer.test(model, data_module,)
-            test_result = [{}] # not testing to save some time
+            test_result = trainer.test(model, data_module,)
+            # test_result = [{}] # not testing to save some time
             trainer.strategy.barrier()  
             
             if trainer.global_rank == 0:

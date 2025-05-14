@@ -16,7 +16,7 @@ from Spectre.datasets.dataset_utils import isomeric_to_canonical_smiles
 
 
 repo_path = str(pathlib.Path(__file__).parent.parent.absolute() / "Spectre")
-SELFIES_MAX_LEN = 460
+SELFIES_MAX_LEN = 600
 
 class NMR_Selfie_Dataset(Dataset):
     def __init__(self, split="train", input_src=["HSQC"], symbol_to_idx=None, p_args=None):

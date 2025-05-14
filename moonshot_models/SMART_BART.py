@@ -66,13 +66,15 @@ class SmartBart(pl.LightningModule):
             for param in self.NMR_peak_encoder.parameters():
                 param.requires_grad = False
             # repeat for others...
-            for param in self.transformer_encoder.parameters():
-                param.requires_grad = False
+            for layer in self.transformer_encoder.layers[:-2]:
+                for param in layer.parameters():
+                    param.requires_grad = False
+                    
             for param in self.NMR_type_embedding.parameters():
                 param.requires_grad = False
             self.latent.requires_grad = False
             self.encoder_frozen_until_epoch = p_args['encoder_frozen_until_epoch']
-
+            
         else:
             self.NMR_peak_encoder = build_encoder(
                 coord_enc = "sce", 
@@ -456,7 +458,10 @@ class SmartBart(pl.LightningModule):
         encoder_params, decoder_params = [], []
         for name, param in self.named_parameters():
             if any(k in name for k in ['NMR_peak_encoder', 'transformer_encoder', 'NMR_type_embedding', 'latent']):
-                encoder_params.append(param)
+                if param.requires_grad == False:
+                    encoder_params.append(param) # the frozen parts are considered as encoder params
+                else:
+                    decoder_params.append(param)
                 # if self.global_rank == 0:
                 #     print(f"encoder_params: {name}")
                     
