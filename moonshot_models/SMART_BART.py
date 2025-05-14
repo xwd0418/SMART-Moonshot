@@ -51,29 +51,40 @@ class SmartBart(pl.LightningModule):
         # self.test_step_outputs = []
         self.predict_step_outputs = {} # map a molecule to its predicted SMILES 
         
-        self.validate_with_generation = False
+        self.validate_with_generation = p_args['validate_with_generation']
           
         # NMR encoder config
+        print(p_args.get("load_untrained_spectre_model"))
+        print("load_encoder", p_args['load_encoder'],"\n\n")
         if p_args['load_encoder']:
             
             from Spectre.inference.inference_utils import choose_model
-            spectre_model = choose_model("optional", load_for_moonshot=True)
-            self.NMR_peak_encoder = spectre_model.enc
-            self.transformer_encoder = spectre_model.transformer_encoder
-            self.NMR_type_embedding = spectre_model.NMR_type_embedding
-            self.latent = spectre_model.latent
-            
-            for param in self.NMR_peak_encoder.parameters():
-                param.requires_grad = False
-            # repeat for others...
-            for layer in self.transformer_encoder.layers[:-2]:
-                for param in layer.parameters():
+            if p_args.get("load_untrained_spectre_model"):
+                spectre_model = choose_model("optional", load_untrained_model=True)
+                self.NMR_peak_encoder = spectre_model.enc
+                self.transformer_encoder = spectre_model.transformer_encoder
+                self.NMR_type_embedding = spectre_model.NMR_type_embedding
+                self.latent = spectre_model.latent
+            else:
+                spectre_model = choose_model("optional", load_for_moonshot=True)
+                self.NMR_peak_encoder = spectre_model.enc
+                self.transformer_encoder = spectre_model.transformer_encoder
+                self.NMR_type_embedding = spectre_model.NMR_type_embedding
+                self.latent = spectre_model.latent
+                
+                for param in self.NMR_peak_encoder.parameters():
                     param.requires_grad = False
-                    
-            for param in self.NMR_type_embedding.parameters():
-                param.requires_grad = False
-            self.latent.requires_grad = False
-            self.encoder_frozen_until_epoch = p_args['encoder_frozen_until_epoch']
+                # repeat for others...
+                for layer in self.transformer_encoder.layers[:-1]:
+                    for param in layer.parameters():
+                        param.requires_grad = False
+                for layer in self.transformer_encoder.layers[-1:]:
+                    reinitialize_layer(layer)
+                        
+                for param in self.NMR_type_embedding.parameters():
+                    param.requires_grad = False
+                self.latent.requires_grad = False
+                self.encoder_frozen_until_epoch = p_args['encoder_frozen_until_epoch']
             
         else:
             self.NMR_peak_encoder = build_encoder(
@@ -282,7 +293,8 @@ class SmartBart(pl.LightningModule):
             logits = self(NMR, NMR_type_indicator)
         else: # teacher forcing
             logits = self(NMR, NMR_type_indicator, tgt_input)
-            
+        # logits = self(NMR, NMR_type_indicator, tgt_input)
+        # logits = self(NMR, NMR_type_indicator)
         loss = self.loss_fn(logits.reshape(-1, logits.size(-1)), tgt_output.reshape(-1))
 
         pred_ids = logits.argmax(dim=-1)  # [B, T]
@@ -676,4 +688,13 @@ class SmartBart(pl.LightningModule):
         parser.add_argument(f"--{model_name}use_separate_optimizers", type=lambda x:bool(str2bool(x)), default=False)
         # parser.add_argument(f"--{model_name}freeze_weights", type=lambda x:bool(str2bool(x)), default=False)
         return parent_parser
-    
+
+def reinitialize_layer(layer):
+    for module in layer.modules():
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)

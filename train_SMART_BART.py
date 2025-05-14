@@ -2,7 +2,7 @@ import pathlib
 import yaml
 
 DATASET_root_path = pathlib.Path("/workspace/")
-curr_exp_folder_name = "freeze_except_last_two_layers"
+curr_exp_folder_name = "re_init_layer_encoder_layer"
 
 import logging, os, sys, torch
 import random, pickle
@@ -88,7 +88,9 @@ def add_parser_arguments( parser):
     parser.add_argument("--accumulate_grad_batches_num", type=int, default=4)
     parser.add_argument("--use_small_model", type=lambda x:bool(str2bool(x)), default=False, help="use small models")
         
-    parser.add_argument("--patience", type=int, default=7)
+    parser.add_argument("--patience", type=int, default=2)
+    parser.add_argument("--check_val_every_n_epoch", type=int, default=8)
+    parser.add_argument("--validate_with_generation", type=lambda x:bool(str2bool(x)), default=True, help="use generation during validation (hence not cheating lol)")
     parser.add_argument("--num_workers", type=int, default=4)
     # for early stopping/model saving
     parser.add_argument("--metric", type=str, default="val/cosine_similarity") #cosine_similarity
@@ -159,7 +161,9 @@ def main():
     # Model args
     if args['foldername'] == "debug" or args['debug'] is True:
         args['debug'] = True
-        args["epochs"] = 10
+        args["epochs"] = 1
+        args["validate_with_generation"] = False # faster val
+        args['check_val_every_n_epoch'] = 1
 
     if args['random_smiles']:
         
@@ -221,7 +225,7 @@ def main():
         
         if args["validate"]:
             my_logger.info("[Main] Just performing validation step")
-            model.validate_with_generation = True
+            # model.validate_with_generation = True
             trainer.validate(model, data_module)
                 
         if args["test"]:
@@ -258,6 +262,7 @@ def main():
                         #  strategy="fsdp" if torch.cuda.device_count() > 1 else "auto",
                          accumulate_grad_batches=args["accumulate_grad_batches_num"],
                          gradient_clip_val=args["gradient_clip_val"],
+                         check_val_every_n_epoch = args['check_val_every_n_epoch'],
         )
         try:
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
@@ -265,30 +270,23 @@ def main():
             if trainer.global_rank == 0:
                 os.system(f"cp -r {out_path}/* {out_path_final}/ ")
                 my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
-                my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
+                if checkpoint_callback.best_model_score is not None:
+                    my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
             
-            if args['debug']:
-                my_logger.info(f"[Main] Debug mode, not running test/predict")
-                return
-            # Ensure all processes synchronize before switching to test mode
+            
             trainer.strategy.barrier()               
-               
-            # --- CLEANUP: release GPU memory used during training ---
-            model.to('cpu')       # move model off GPU
-            del model             # delete model
-            del trainer           # delete trainer
-            import gc
-            gc.collect()
-            torch.cuda.empty_cache()
-                
-            # my_logger.info(f"[Main] my process rank: {os.getpid()}")
+          
             trainer = pl.Trainer(logger=False, use_distributed_sampler=False) # ensure accurate test results
+            args['load_untrained_spectre_model'] = True # so we dont waste time loading the spectre, as we will load smart bart weight anyway
             model = model_class.load_from_checkpoint(checkpoint_path=checkpoint_callback.best_model_path, 
                                                  selfie_symbol_to_idx = data_module.symbol_to_idx,
                                                 selfie_max_len = model_selfie_len,
                                                 p_args = args,
             )
-            model.validate_with_generation = True
+            if args['debug']:
+                my_logger.info(f"[Main] Debug mode, not running test/predict")
+                return
+            # model.validate_with_generation = True
             
             trainer.strategy.barrier()  
             predict_results = trainer.predict(model, data_module,)
@@ -296,17 +294,16 @@ def main():
                 my_logger.info(f"[Main] Prediction path {checkpoint_callback.best_model_path}!")
                 my_logger.info(f"[Main] Prediction result: {predict_results}")
             trainer.strategy.barrier()  
-            val_result = trainer.validate(model, data_module) 
-            trainer.strategy.barrier()  
+            # val_result = trainer.validate(model, data_module) 
+            # trainer.strategy.barrier()  
             test_result = trainer.test(model, data_module,)
             # test_result = [{}] # not testing to save some time
             trainer.strategy.barrier()  
             
             if trainer.global_rank == 0:
-                # my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
                 my_logger.info(f"[Main] Testing path {checkpoint_callback.best_model_path}!")
                 all_test_results = [{}]
-                all_val_results = [{}]
+                # all_val_results = [{}]
                 
                 
                 
@@ -314,19 +311,19 @@ def main():
                 test_result[0]['best_epoch'] = checkpoint_callback.best_model_path.split("/")[-1].split("-")[0]
                 if not args['optional_inputs']:
                     all_test_results = test_result
-                    all_val_results = val_result
+                    # all_val_results = val_result
                 else:
                     # loader_all_inputs, loader_HSQC_H_NMR, loader_HSQC_C_NMR, loader_only_hsqc, loader_only_1d, loader_only_H_NMR, loader_only_C_NMR
                     for loader_idx, NMR_type in enumerate(["all_inputs", "HSQC_H_NMR", "HSQC_C_NMR", "only_hsqc", "only_1d", "only_H_NMR", "only_C_NMR"]):
                         model.only_test_this_loader(loader_idx=loader_idx)
                     
                     all_test_results = test_result
-                    all_val_results = val_result
+                    # all_val_results = val_result
 
                 with open(f"{out_path}/{path1}/{path2}/test_result.pkl", "wb") as f:
                     pickle.dump(all_test_results, f)
-                with open(f"{out_path}/{path1}/{path2}/val_result.pkl", "wb") as f:
-                    pickle.dump(all_val_results, f)
+                # with open(f"{out_path}/{path1}/{path2}/val_result.pkl", "wb") as f:
+                #     pickle.dump(all_val_results, f)
                 with open(f"{out_path}/{path1}/{path2}/predict_result.pkl", "wb") as f:
                     pickle.dump(predict_results, f)
                 
