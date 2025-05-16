@@ -162,7 +162,7 @@ def main():
     if args['foldername'] == "debug" or args['debug'] is True:
         args['debug'] = True
         args["epochs"] = 1
-        args["validate_with_generation"] = False # faster val
+        # args["validate_with_generation"] = False # faster val
         args['check_val_every_n_epoch'] = 1
 
     if args['random_smiles']:
@@ -264,7 +264,8 @@ def main():
                          gradient_clip_val=args["gradient_clip_val"],
                          check_val_every_n_epoch = args['check_val_every_n_epoch'],
         )
-        try:
+        # try:
+        if 1:
             trainer.fit(model, data_module,ckpt_path=args["checkpoint_path"])
 
             if trainer.global_rank == 0:
@@ -272,8 +273,13 @@ def main():
                 my_logger.info(f"[Main] Copied all content from {out_path} to {out_path_final}")
                 if checkpoint_callback.best_model_score is not None:
                     my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()}")
-            
-            
+                else:
+                    my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, no best score found")
+                    return
+                if checkpoint_callback.best_model_score.item() < 0.55:
+                    my_logger.info(f"[Main] Validation metric {checkpoint_callback.monitor}, best score: {checkpoint_callback.best_model_score.item()} \n not good enough, exiting")
+                    return
+
             trainer.strategy.barrier()               
           
             trainer = pl.Trainer(logger=False, use_distributed_sampler=False) # ensure accurate test results
@@ -337,14 +343,14 @@ def main():
                     os.remove(checkpoint_callback.best_model_path)
                     my_logger.info(f"[Main] Deleted checkpoint {checkpoint_callback.best_model_path}")
                     
-        except Exception as e:
-            if trainer.global_rank == 0:
-                my_logger.error(f"[Main] Exception during training: \n{e}")
-        finally:
-            if trainer.global_rank == 0:
-                os.system(f"cp -r {out_path}/* {out_path_final}/ ")
-                my_logger.info(f"[Main] Copied all test/val/predict pkl files from {out_path} to {out_path_final}")
-                logging.shutdown()
+        # except Exception as e:
+        #     if trainer.global_rank == 0:
+        #         my_logger.error(f"[Main] Exception during training: \n{e}")
+        # finally:
+        #     if trainer.global_rank == 0:
+        #         os.system(f"cp -r {out_path}/* {out_path_final}/ ")
+        #         my_logger.info(f"[Main] Copied all test/val/predict pkl files from {out_path} to {out_path_final}")
+        #         logging.shutdown()
 
 
 

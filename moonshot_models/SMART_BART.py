@@ -22,7 +22,7 @@ from torch.optim import AdamW
 
 from concurrent.futures import ThreadPoolExecutor
 import psutil, os
-
+MAX_SEILFIES_LEN_TEST_VAL = 395
 
 # ------------------------ Model ------------------------
 class SmartBart(pl.LightningModule):
@@ -54,8 +54,7 @@ class SmartBart(pl.LightningModule):
         self.validate_with_generation = p_args['validate_with_generation']
           
         # NMR encoder config
-        print(p_args.get("load_untrained_spectre_model"))
-        print("load_encoder", p_args['load_encoder'],"\n\n")
+        print("load_encoder", p_args['load_encoder'])
         if p_args['load_encoder']:
             
             from Spectre.inference.inference_utils import choose_model
@@ -202,11 +201,10 @@ class SmartBart(pl.LightningModule):
             logits = self.lm_output_layer(out)
             logits[:,:,0] = float('-inf')
             return logits
-        else:
+        else: # autoregressive decoding
             tgt = self.dec_start_token.expand(memory.size(0), 1,-1)
             dec_output_logits = []
             finished = torch.zeros(memory.size(0), dtype=torch.bool, device=memory.device)
-
             for i in range(self.max_len):
                 out = self.decoder(
                     tgt, 
@@ -221,8 +219,8 @@ class SmartBart(pl.LightningModule):
                 dec_output_logits.append(dec_logits)
                 
                 next_token_ids = torch.argmax(dec_logits, dim=1)  # (B,)
-                finished |= (next_token_ids == self.selfie_padding_idx)
-                if finished.all():
+                finished |= (next_token_ids == self.selfie_symbol_to_idx['[END]'])
+                if finished.all() :
                     # If all sequences are done, pad the rest
                     remaining_len = self.max_len - (i + 1)
                     pad_logits = torch.full(
@@ -231,11 +229,11 @@ class SmartBart(pl.LightningModule):
                         device=memory.device
                     )
                     pad_logits[:, :, self.selfie_padding_idx] = 0.0  # Logits for PAD token only
-                    dec_output_logits.extend(pad_logits.permute(1, 0, 2))  # add along time
+                    dec_output_logits.extend(pad_logits)  # add along time
                     break
         
                 next_embedded_token = self.decoder_embedding(next_token_ids).unsqueeze(1) + self.pos_embedding[:, i, :]
-                
+                # print("next_token", self.idx_to_symbol[next_token_ids[0].item()])
                 tgt = torch.cat([tgt, next_embedded_token], dim=1)
                 
             dec_output_logits = torch.stack(dec_output_logits, dim=1)
@@ -373,6 +371,7 @@ class SmartBart(pl.LightningModule):
             if x == 2:
                 break
             selfie += self.idx_to_symbol[x]
+            print(self.idx_to_symbol[x])
 
         return selfie
     
